@@ -1,0 +1,110 @@
+:root {
+  --win-bg:#0f0f10;
+  --chrome-bg:#17181a;
+  --chrome-ink:#eaeaea;
+  --chrome-muted:#9aa0a6;
+  --tab-bg:#1d1f22;
+  --tab-active:#24272b;
+  --tab-hover:#2a2e33;
+  --accent:#7c39ff;
+  --danger:#e05151;
+
+  /* altura do header será definida por JS: --header-h */
+  --header-h: 120px; /* fallback */
+}
+
+html, body {
+  margin: 0;
+  height: 100dvh;
+  background: var(--win-bg);
+  color: var(--chrome-ink);
+  font: 13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+  overflow: hidden; /* sem scroll do body */
+}
+
+/* ====== HEADER ====== */
+header.titlebar {
+  -webkit-app-region: drag;
+  background: var(--chrome-bg);
+  border-bottom: 1px solid #232427;
+  padding: 6px 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* altura NÃO fixa aqui; quem manda é JS -> --header-h */
+}
+header .nav, header .tabstrip { -webkit-app-region: no-drag; }
+
+.nav { display:flex; align-items:center; gap:8px; height:46px; }
+button.icon {
+  min-width:32px; height:32px; border-radius:999px;
+  border:1px solid #2e3238; background:#1b1e22; color:var(--chrome-ink);
+}
+button.icon:hover { background:#252a31 }
+#address {
+  flex:1; height:36px; border-radius:22px; padding:0 14px;
+  border:1px solid #2e3238; background:#111214; color:var(--chrome-ink);
+}
+#address:focus { border-color:#3c4149; outline:2px solid #3c414944 }
+.go { height:32px; border-radius:18px; background:#2a2e35; border:1px solid #363b44 }
+.cap { height:32px; border-radius:18px; font-weight:600; }
+.cap-off { background:#2a2e35; border:1px solid #363b44 }
+.cap-on { background:var(--accent); border:1px solid var(--accent) }
+
+.tabstrip { display:flex; align-items:center; gap:4px; height:36px; }
+.tab {
+  display:flex; align-items:center; gap:8px;
+  height:36px; max-width:280px; padding:0 10px 0 8px;
+  background:var(--tab-bg); color:var(--chrome-ink);
+  border-radius:10px 10px 8px 8px; border:1px solid #2b2e33;
+  user-select:none; cursor:pointer;
+}
+.tab:hover { background:var(--tab-hover); }
+.tab.active { background:var(--tab-active); border-color:#3d4248; }
+.tab .fav { width:16px; height:16px; border-radius:4px; background:#444 }
+.tab .title { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px }
+.tab .close {
+  margin-left:4px; width:22px; height:22px; border-radius:6px;
+  display:grid; place-items:center; border:1px solid transparent;
+  background:transparent; color:var(--chrome-muted);
+}
+.tab .close:hover { background:#2f3339; border-color:#3a4048 }
+.tab-new {
+  width:28px; height:28px; border-radius:8px;
+  border:1px dashed #3a3e45; color:var(--chrome-muted);
+  background:transparent; display:grid; place-items:center;
+}
+.tab-new:hover { border-style:solid; background:#25292f; color:var(--chrome-ink) }
+
+.window-controls { display:flex; gap:6px }
+.window-controls .wc { width:34px; height:28px; border-radius:8px; border:1px solid #2f3339; background:#1b1e22 }
+.window-controls .wc:hover { background:#262b32 }
+.window-controls .danger { background:#2a1518; border-color:#3a2226; color:#ffd7d7 }
+.window-controls .danger:hover { background:#371a1f }
+
+/* ====== CONTEÚDO ======
+   #webviews fica FIXO: da borda inferior até logo abaixo do header */
+#webviews {
+  position: fixed;
+  top: var(--header-h);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+}
+
+/* webview sempre 100% da área do #webviews */
+#webviews > webview {
+  /* SEM position:absolute/inset */
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: none;     /* apenas o ativo aparece */
+  background: #000;  /* evita transparência */
+}
+#webviews > webview.active { display: block }
+
+
+/* scrollbar sutil */
+*::-webkit-scrollbar { height:10px; width:10px }
+*::-webkit-scrollbar-thumb { background:#353a42; border-radius:10px }
