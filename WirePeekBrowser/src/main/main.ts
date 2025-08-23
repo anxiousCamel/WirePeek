@@ -1,10 +1,16 @@
 ﻿// src/main/main.ts
 import { app, BrowserWindow, ipcMain, session } from "electron";
+import type {
+  IpcMainEvent,
+  IpcMainInvokeEvent,
+  BrowserWindowConstructorOptions
+} from "electron";
 import fs from "fs";
 import path from "path";
 import { config } from "./config";
 import { attachNetworkCapture } from "./capture";
-import type { BrowserWindowConstructorOptions } from "electron";
+import { CaptureSession } from "./capture.session";
+import { pathToFileURL } from "url";
 
 /** Ambiente atual */
 const isDev =
@@ -12,24 +18,16 @@ const isDev =
   process.env.ELECTRON_ENV === "development" ||
   !app.isPackaged;
 
-/**
- * Resolve um caminho preferindo DEV e caindo para PROD se não existir.
- * Útil porque em dev o __dirname costuma ser “…/src/main”,
- * mas o preload transpilado fica em “dist/preload”.
- */
+/** Resolve um caminho preferindo DEV e caindo para PROD se não existir. */
 function resolveExisting(devPath: string, prodPath: string) {
   return fs.existsSync(devPath) ? devPath : prodPath;
 }
 
 /** Caminhos de assets (HTML e preload) mantendo DEV/PROD limpo */
 function getAssetPaths() {
-  // Em dev (rodando a partir do source):
-  //  • HTML vive em src/renderer
-  //  • preload transpilado vive em dist/preload/preload.js (tsc -w)
   const devHtml = path.resolve(__dirname, "../../src/renderer/index.html");
   const devPreload = path.resolve(__dirname, "../../dist/preload/preload.js");
 
-  // Em prod (app empacotado): __dirname === "<app>/dist/main"
   const prodHtml = path.join(__dirname, "../renderer/index.html");
   const prodPreload = path.join(__dirname, "../preload/preload.js");
 
@@ -39,8 +37,87 @@ function getAssetPaths() {
   };
 }
 
+/** ---------------- Tipos dos eventos do WebView ---------------- */
+type RestRequestPayload = {
+  ts: number;
+  url: string;
+  method: string;
+  reqHeaders: Record<string, string>;
+  reqBody?: string;
+};
+
+type RestResponsePayload = {
+  ts: number;
+  url: string;
+  method: string;
+  status: number;
+  statusText: string;
+  resHeaders: Record<string, string>;
+  bodySize: number;
+  timingMs: number;
+};
+
+type WsOpenPayload = {
+  ts: number;
+  id: string;
+  url: string;
+  protocols?: string | string[];
+};
+
+type WsMsgPayload = {
+  ts: number;
+  id: string;
+  dir: "in" | "out";
+  data: string;
+};
+
+type WsClosePayload = {
+  ts: number;
+  id: string;
+  code: number;
+  reason: string;
+};
+
+type WsErrorPayload = {
+  ts: number;
+  id: string;
+};
+
+type CapEnvelope =
+  | { channel: "cap:rest:request";  payload: RestRequestPayload }
+  | { channel: "cap:rest:response"; payload: RestResponsePayload }
+  | { channel: "cap:ws:open";       payload: WsOpenPayload }
+  | { channel: "cap:ws:msg";        payload: WsMsgPayload }
+  | { channel: "cap:ws:close";      payload: WsClosePayload }
+  | { channel: "cap:ws:error";      payload: WsErrorPayload };
+
 /** --- Estado simples de captura no processo principal --- */
 let detachCapture: (() => void) | null = null;
+let capSession: CaptureSession | null = null;
+let inspector: BrowserWindow | null = null;
+
+function openInspectorWindow(parent: BrowserWindow) {
+  if (inspector && !inspector.isDestroyed()) return;
+
+  const devHtml = path.resolve(__dirname, "../../src/inspector/index.html");
+  const prodHtml = path.join(__dirname, "../inspector/index.html");
+  const html = fs.existsSync(devHtml) ? devHtml : prodHtml;
+
+  inspector = new BrowserWindow({
+    width: 900,
+    height: 600,
+    backgroundColor: "#0f0f10",
+    title: "WirePeek Inspector",
+    parent,
+    webPreferences: { contextIsolation: true },
+  });
+  inspector.loadFile(html);
+}
+
+function inspectorBroadcast(channel: CapEnvelope["channel"], payload: CapEnvelope["payload"]) {
+  if (!inspector || inspector.isDestroyed()) return;
+  inspector.webContents.postMessage("cap-event", { channel, payload });
+}
 
 function isCapturing(_win: BrowserWindow): boolean {
   return !!detachCapture;
@@ -60,12 +137,11 @@ function stopCapture(_win: BrowserWindow) {
 function createWindow(): BrowserWindow {
   const { html, preload } = getAssetPaths();
 
-  // Monte as opções básicas
   const opts: BrowserWindowConstructorOptions = {
     width: config.winWidth,
     height: config.winHeight,
     backgroundColor: "#111111",
-    frame: false, // sem barra nativa
+    frame: false,
     webPreferences: {
       preload,
       contextIsolation: true,
@@ -74,7 +150,6 @@ function createWindow(): BrowserWindow {
     },
   };
 
-  // Só defina titleBarStyle no macOS
   if (process.platform === "darwin") {
     opts.titleBarStyle = "hiddenInset";
   }
@@ -88,12 +163,17 @@ function createWindow(): BrowserWindow {
   }
   win.webContents.session.setUserAgent(config.userAgent || app.userAgentFallback);
 
-  // Carrega a UI (src em dev, dist em prod)
+  // Carrega a UI
   win.loadFile(html);
 
   // Envia config inicial para a UI
+  const wvPreloadDev = path.resolve(__dirname, "../../dist/webview/preload.capture.js");
+  const wvPreloadProd = path.join(__dirname, "../webview/preload.capture.js");
+  const wvPreloadPath = fs.existsSync(wvPreloadDev) ? wvPreloadDev : wvPreloadProd;
+  const wvPreloadUrl  = pathToFileURL(wvPreloadPath).href;
+
   win.webContents.once("did-finish-load", () => {
-    win.webContents.send("ui:config", { targetUrl: config.targetUrl, isDev });
+    win.webContents.send("ui:config", { targetUrl: config.targetUrl, isDev,  wvPreload: wvPreloadUrl, });
   });
 
   if (isDev) {
@@ -109,42 +189,88 @@ function createWindow(): BrowserWindow {
 app.whenReady().then(() => {
   const win = createWindow();
 
-  // IPC: controle de captura
+  // ---- Controle de captura
   ipcMain.handle("wirepeek:start", () => {
-    if (!isCapturing(win)) startCapture(win);
+    if (!isCapturing(win)) {
+      startCapture(win);
+      capSession = new CaptureSession();
+      openInspectorWindow(win);
+    }
     return { capturing: isCapturing(win) };
   });
 
   ipcMain.handle("wirepeek:stop", () => {
     const out = stopCapture(win);
+    if (capSession) {
+      capSession.stop();
+      capSession = null;
+    }
     return { capturing: isCapturing(win), out };
   });
 
-  ipcMain.handle("wirepeek:navigate", (_evt, url: string) => {
+  // ---- Recebe eventos do webview e grava (tipado)
+  ipcMain.on(
+    "cap:from-webview",
+    (_ev: IpcMainEvent, env: CapEnvelope) => {
+      if (!capSession) return;
+
+      switch (env.channel) {
+        case "cap:rest:request":
+          capSession.onRestRequest(env.payload);
+          break;
+        case "cap:rest:response":
+          capSession.onRestResponse(env.payload);
+          break;
+        case "cap:ws:open":
+          capSession.onWsOpen(env.payload);
+          break;
+        case "cap:ws:msg":
+          capSession.onWsMsg(env.payload);
+          break;
+        case "cap:ws:close":
+          capSession.onWsClose(env.payload);
+          break;
+        case "cap:ws:error":
+          capSession.onWsError(env.payload);
+          break;
+      }
+
+      // espelha para o Inspector, se aberto
+      inspectorBroadcast(env.channel, env.payload);
+    }
+  );
+
+  // ---- Navegação direta
+  ipcMain.handle("wirepeek:navigate", (_evt: IpcMainInvokeEvent, url: string) => {
     if (typeof url === "string" && url.length > 0) {
       try {
         new URL(url);
       } catch {
-        return { ok: false, error: "URL inválida" };
+        return { ok: false, error: "URL inválida" as const };
       }
       win.loadURL(url);
-      return { ok: true };
+      return { ok: true as const };
     }
-    return { ok: false, error: "URL vazia" };
+    return { ok: false as const, error: "URL vazia" as const };
   });
 
-  // IPCs de controle da janela
+  // ---- IPCs de controle da janela
   ipcMain.handle("win:minimize", () => {
-    const w = BrowserWindow.getFocusedWindow(); w?.minimize();
+    const w = BrowserWindow.getFocusedWindow();
+    w?.minimize();
   });
+
   ipcMain.handle("win:toggleMaximize", () => {
     const w = BrowserWindow.getFocusedWindow();
     if (!w) return;
-    if (w.isMaximized()) w.unmaximize(); else w.maximize();
+    if (w.isMaximized()) w.unmaximize();
+    else w.maximize();
     return { maximized: w.isMaximized() };
   });
+
   ipcMain.handle("win:close", () => {
-    const w = BrowserWindow.getFocusedWindow(); w?.close();
+    const w = BrowserWindow.getFocusedWindow();
+    w?.close();
   });
 
   app.on("activate", () => {

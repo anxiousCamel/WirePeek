@@ -115,12 +115,23 @@ function createTabEl(tab) {
 
 function createWebview(tab, url) {
   const view = document.createElement("webview");
-  view.setAttribute("partition", "persist:wirepeek");
+  //view.setAttribute("partition", "persist:wirepeek"); //POR ENQUANTO EU VOU COMENTAR ISSO ENQUANTO NÃO ARRUMO A JANELA...
   view.setAttribute("allowpopups", "");
+  view.setAttribute("preload", window.__wvPreloadPath || "");
   view.setAttribute("data-managed-size", ""); // usado pelo fit.js se existir
   view.setAttribute("width", "0");
   view.setAttribute("height", "0");
   view.src = url || "https://www.google.com";
+
+  const wvPreload = window.__wvPreloadPath; // já preenchido no preload.ts
+  if (wvPreload) view.setAttribute("preload", wvPreload);
+
+  // ---- encaminhar eventos de captura do convidado para o main ----
+  view.addEventListener("ipc-message", (e) => {
+    const { channel, args } = e;
+    if (!channel?.startsWith("cap:")) return;
+    window.wirepeek?.emitCapture?.(channel, args?.[0] ?? {});
+  });
 
   // Loader no botão recarregar
   view.addEventListener("did-start-loading", () => btnReload.classList.add("loading"));
