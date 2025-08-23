@@ -1,3 +1,5 @@
+// WirePeekBrowser/src/renderer/fit.js
+
 /* eslint-env browser */
 /**
  * Ajusta --header-h dinamicamente usando a altura real do header.

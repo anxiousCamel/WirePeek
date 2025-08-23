@@ -1,14 +1,8 @@
-﻿/**
+﻿// WirePeekBrowser/src/main/capture.ts
+/**
  * @file NetworkCapture.ts
- * @brief Captura e loga tráfego de rede em um `BrowserWindow` do Electron,
- *        com suporte a DNS reverse e cache local de IPs.
- *
- * @details
- *  - Usa os eventos de `webRequest` da sessão do Electron.
- *  - Loga fases: request, headers, response e error.
- *  - Inclui headers limitados (whitelist) para evitar excesso de dados.
- *  - Resolve IP remoto com cache DNS.
- *  - Retorna uma função `detach()` para remover todos os listeners.
+ * Captura tráfego via webRequest e (além de logar) emite eventos tipados
+ * para quem chamar attachNetworkCapture(win, onEvent).
  */
 
 import type {
@@ -22,26 +16,50 @@ import type {
 import dns from "dns";
 import { URL } from "url";
 
-/** Cache de resolução DNS: hostname -> IP */
+/** ===== Tipos compartilhados com main (mesma forma do webview) ===== */
+export type RestRequestPayload = {
+  ts: number;
+  url: string;
+  method: string;
+  reqHeaders: Record<string, string>;
+  reqBody?: string;
+};
+export type RestResponsePayload = {
+  ts: number;
+  url: string;
+  method: string;
+  status: number;
+  statusText: string;
+  resHeaders: Record<string, string>;
+  bodySize: number;
+  timingMs: number;
+};
+
+export type CapChannel =
+  | "cap:rest:request"
+  | "cap:rest:response"
+  | "cap:rest:before-send-headers"
+  | "cap:rest:error";
+
+export type CapEvent = {
+  channel: CapChannel;
+  payload: RestRequestPayload | RestResponsePayload | Record<string, unknown>;
+};
+
+type OnEventFn = (channel: CapChannel, payload: CapEvent["payload"]) => void;
+
+/** ===== util: DNS com cache ===== */
 const dnsCache = new Map<string, string>();
 
-/**
- * Resolve IP do host remoto com cache local.
- * @param requestUrl URL da requisição.
- * @returns IP do host ou `"N/D"` caso não resolvido.
- */
 async function resolveRemoteIp(requestUrl: string): Promise<string> {
   try {
     const hostname = new URL(requestUrl).hostname;
     if (!hostname) return "N/D";
-
     const hit = dnsCache.get(hostname);
     if (hit) return hit;
-
     const ip = await new Promise<string>((resolve) => {
       dns.lookup(hostname, (err, address) => resolve(err ? "N/D" : address));
     });
-
     if (ip !== "N/D") dnsCache.set(hostname, ip);
     return ip;
   } catch {
@@ -49,11 +67,7 @@ async function resolveRemoteIp(requestUrl: string): Promise<string> {
   }
 }
 
-/**
- * Normaliza headers em um mapa seguro.
- * @param headers Headers originais da requisição/resposta.
- * @returns Mapa filtrado de headers permitidos.
- */
+/** headers → Record<string,string> com whitelist */
 function toSafeHeaderMap(
   headers: Record<string, string | string[]> | undefined
 ): Record<string, string> {
@@ -77,143 +91,135 @@ function toSafeHeaderMap(
   return out;
 }
 
-/** -------------------- BUILDERS DE LOG -------------------- */
+/** ===== contexto interno por requestId ===== */
+type ReqCtx = {
+  startedAt: number;
+  method: string;
+  url: string;
+  reqHeaders: Record<string, string>;
+};
+const ctxById = new Map<number, ReqCtx>();
 
-/**
- * Monta log da fase "request".
- */
-function buildRequestLog(d: OnBeforeRequestListenerDetails) {
-  return {
-    phase: "request" as const,
-    id: d.id,
-    url: d.url,
-    method: d.method,
-    resourceType: d.resourceType,
-    timestamp: Date.now(),
-  };
-}
-
-/**
- * Monta log da fase "before-send-headers".
- */
-function buildBeforeSendHeadersLog(d: OnBeforeSendHeadersListenerDetails) {
-  return {
-    phase: "before-send-headers" as const,
-    id: d.id,
-    url: d.url,
-    method: d.method,
-    requestHeaders: toSafeHeaderMap(d.requestHeaders),
-    timestamp: Date.now(),
-  };
-}
-
-/**
- * Monta log da fase "response" (com IP remoto).
- */
-async function buildResponseLog(d: OnCompletedListenerDetails) {
-  const ip = await resolveRemoteIp(d.url);
-  return {
-    phase: "response" as const,
-    id: d.id,
-    url: d.url,
-    method: d.method,
-    resourceType: d.resourceType,
-    statusCode: d.statusCode,
-    fromCache: d.fromCache,
-    responseHeaders: toSafeHeaderMap(
-      d.responseHeaders as Record<string, string[]> | undefined
-    ),
-    ip,
-    timestamp: Date.now(),
-  };
-}
-
-/**
- * Monta log da fase "error" (com IP remoto).
- */
-async function buildErrorLog(d: OnErrorOccurredListenerDetails) {
-  const ip = await resolveRemoteIp(d.url);
-  return {
-    phase: "error" as const,
-    id: d.id,
-    url: d.url,
-    method: d.method,
-    resourceType: d.resourceType,
-    error: d.error,
-    ip,
-    timestamp: Date.now(),
-  };
-}
-/** ---------------------------------------------------------- */
-
-/**
- * Atacha captura de tráfego a um `BrowserWindow`.
- *
- * @param win Janela alvo (`BrowserWindow`) do Electron.
- * @returns Função `detach()` que remove todos os listeners.
- *
- * @example
- * ```ts
- * const detach = attachNetworkCapture(mainWindow);
- * // ... usar navegador
- * detach(); // remove listeners
- * ```
- */
-export function attachNetworkCapture(win: BrowserWindow): () => void {
+/** ====== FUNÇÃO PRINCIPAL ====== */
+export function attachNetworkCapture(
+  win: BrowserWindow,
+  onEvent?: OnEventFn
+): () => void {
   const ses = win.webContents.session;
   const filter: WebRequestFilter = { urls: ["*://*/*"] };
+  const emit = (channel: CapChannel, payload: CapEvent["payload"]): void => {
+    try {
+      onEvent?.(channel, payload);
+    } catch {
+      // noop
+    }
+  };
 
-  /** Captura inicial da requisição */
+  /** request start */
   const onBeforeRequest = (
     d: OnBeforeRequestListenerDetails,
     callback: (resp: { cancel?: boolean; redirectURL?: string }) => void
   ): void => {
     try {
-      console.log("[REQ]", JSON.stringify(buildRequestLog(d)));
+      // cria/atualiza contexto
+      ctxById.set(d.id, {
+        startedAt: Date.now(),
+        method: d.method,
+        url: d.url,
+        reqHeaders: {},
+      });
+
+      // opcional: log no terminal
+      // console.log("[REQ]", JSON.stringify({ id: d.id, url: d.url, method: d.method }));
+
+      // emite um "request" no formato RestRequestPayload (sem body)
+      const payload: RestRequestPayload = {
+        ts: Date.now(),
+        url: d.url,
+        method: d.method,
+        reqHeaders: {},
+      };
+      emit("cap:rest:request", payload);
     } finally {
-      callback({}); // segue fluxo normal
+      callback({});
     }
   };
 
-  /** Captura headers antes de envio */
+  /** request headers */
   const onBeforeSendHeaders = (
     d: OnBeforeSendHeadersListenerDetails,
     callback: (resp: { cancel?: boolean; requestHeaders?: Record<string, string> }) => void
   ): void => {
     try {
-      console.log("[HDR]", JSON.stringify(buildBeforeSendHeadersLog(d)));
+      const ctx = ctxById.get(d.id);
+      if (ctx) {
+        ctx.reqHeaders = toSafeHeaderMap(d.requestHeaders);
+      }
+      emit("cap:rest:before-send-headers", {
+        ts: Date.now(),
+        url: d.url,
+        method: d.method,
+        reqHeaders: toSafeHeaderMap(d.requestHeaders),
+      } satisfies RestRequestPayload);
     } finally {
-      callback({}); // segue fluxo normal
+      callback({});
     }
   };
 
-  /** Captura de resposta finalizada */
+  /** response completed */
   const onCompleted = (d: OnCompletedListenerDetails): void => {
     void (async () => {
-      const log = await buildResponseLog(d);
-      console.log("[RES]", JSON.stringify(log));
+      const now = Date.now();
+      const ctx = ctxById.get(d.id);
+      const timing = ctx ? now - ctx.startedAt : 0;
+      const resHeaders = toSafeHeaderMap(
+        d.responseHeaders as Record<string, string[]> | undefined
+      );
+
+      // opcional: enriquecimento com IP remoto (não usado na UI atual)
+      // const ip = await resolveRemoteIp(d.url);
+
+      const payload: RestResponsePayload = {
+        ts: now,
+        url: d.url,
+        method: d.method,
+        status: d.statusCode,
+        statusText: "", // Electron não expõe statusText aqui
+        resHeaders,
+        bodySize: 0, // webRequest não dá o corpo; manter 0
+        timingMs: timing,
+      };
+
+      // console.log("[RES]", JSON.stringify({ ...payload, id: d.id }));
+      emit("cap:rest:response", payload);
+
+      // limpa contexto
+      ctxById.delete(d.id);
     })();
   };
 
-  /** Captura de erro de rede */
+  /** network error */
   const onErrorOccurred = (d: OnErrorOccurredListenerDetails): void => {
     void (async () => {
-      const log = await buildErrorLog(d);
-      console.warn("[ERR]", JSON.stringify(log));
+      // opcional: ip
+      await resolveRemoteIp(d.url);
+      emit("cap:rest:error", {
+        ts: Date.now(),
+        url: d.url,
+        method: d.method,
+        reqHeaders: {},
+      } satisfies RestRequestPayload);
+      // não removo contexto aqui porque pode haver retries
     })();
   };
 
-  // Registrar listeners
+  // registra
   ses.webRequest.onBeforeRequest(filter, onBeforeRequest);
   ses.webRequest.onBeforeSendHeaders(filter, onBeforeSendHeaders);
   ses.webRequest.onCompleted(filter, onCompleted);
   ses.webRequest.onErrorOccurred(filter, onErrorOccurred);
 
-  /** 
-   * Remoção segura de todos listeners.
-   * Electron typings não expõem overload `null`,
-   * então usamos cast estrutural para suportar.
-   */
+  /** detach seguro */
   type RemoveAll = (filter: null) => void;
   const remover = ses.webRequest as unknown as {
     onBeforeRequest: RemoveAll;
@@ -222,13 +228,11 @@ export function attachNetworkCapture(win: BrowserWindow): () => void {
     onErrorOccurred: RemoveAll;
   };
 
-  /** Função para desligar captura */
-  const detach = (): void => {
+  return (): void => {
     remover.onBeforeRequest(null);
     remover.onBeforeSendHeaders(null);
     remover.onCompleted(null);
     remover.onErrorOccurred(null);
+    ctxById.clear();
   };
-
-  return detach;
 }

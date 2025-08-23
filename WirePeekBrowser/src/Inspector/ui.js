@@ -1,11 +1,11 @@
+// WirePeekBrowser/src/Inspector/ui.js
 /* eslint-env browser */
 const list = document.getElementById("list");
 const q = document.getElementById("q");
 let rows = [];
 
-window.addEventListener("message", (e) => {
-    const { channel, payload } = e.data || {};
-    if (!channel) return;
+// >>> TROCA: ouvir via preload do Inspector (não window.postMessage)
+window.wirepeekInspector?.onCapEvent((channel, payload) => {
     push(channel, payload);
 });
 
@@ -13,8 +13,9 @@ function push(channel, p) {
     let text = "", cls = "";
     if (channel.startsWith("cap:rest")) {
         if (channel.endsWith("request")) text = `[REST→] ${p.method} ${p.url}`;
-        else text = `[REST←] ${p.status} ${p.method} ${p.url}`;
-        cls = channel.endsWith("response") && p.status >= 400 ? "err" : "ok";
+        else if (channel.endsWith("response")) text = `[REST←] ${p.status} ${p.method} ${p.url}`;
+        else text = `[REST] ${p.method || ""} ${p.url || ""}`;
+        cls = channel.endsWith("response") && typeof p.status === "number" && p.status >= 400 ? "err" : "ok";
     } else if (channel.startsWith("cap:ws")) {
         if (channel.includes(":open")) text = `[WS ◉] ${p.id} ${p.url}`;
         if (channel.includes(":msg")) text = `[WS ⇄ ${p.dir}] ${p.id} ${String(p.data).slice(0, 140)}`;

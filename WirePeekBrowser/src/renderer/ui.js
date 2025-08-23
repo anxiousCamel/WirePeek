@@ -1,13 +1,6 @@
 ﻿/* eslint-env browser */
 
-/**
- * UI principal: abas, navegação e dimensionamento dos webviews.
- * - Força o iframe interno do <webview> a ter:
- *   style="flex: 1 1 auto; height: 100%; width: 100%; border: 0px;"
- */
-
-// ---------------------- DOM refs ----------------------
-const $ = (id) => document.getElementById(id);
+const $ = (id)=>document.getElementById(id);
 
 const tabstrip   = $("tabstrip");
 const btnNewTab  = $("tab-new");
@@ -20,282 +13,390 @@ const btnFwd    = $("btn-fwd");
 const btnReload = $("btn-reload");
 const btnCap    = $("btn-capture");
 
-// ---------------------- Window controls ----------------------
-$("win-min").addEventListener("click", () => window.win?.minimize());
-$("win-close").addEventListener("click", () => window.win?.close());
-$("win-max").addEventListener("click", async () => {
-  const res = await window.win?.toggleMaximize();
-  if (res && "maximized" in res) setMaxButtonIcon(res.maximized);
+const NEUTRAL_FALLBACK = "#24272b";
+
+$("win-min").addEventListener("click",()=>window.win?.minimize());
+$("win-close").addEventListener("click",()=>window.win?.close());
+$("win-max").addEventListener("click",async()=>{
+  const res=await window.win?.toggleMaximize();
+  if(res&&"maximized"in res) setMaxButtonIcon(res.maximized);
 });
-window.win?.onMaximizedChange((isMax) => setMaxButtonIcon(isMax));
-function setMaxButtonIcon(isMax) {
-  const b = $("win-max"); if (!b) return;
-  b.textContent = isMax ? "❐" : "🗖";
+window.win?.onMaximizedChange((isMax)=>setMaxButtonIcon(isMax));
+function setMaxButtonIcon(isMax){const b=$("win-max"); if(!b) return; b.textContent=isMax?"❐":"🗖";}
+
+/** ======= estado ======= */
+let nextId=1;
+const tabs=new Map(); // id -> { id, tabEl, viewEl, title, url, color, ink }
+let order=[];         // array de ids na ordem visual
+let activeId=null;
+
+/** ======= helpers visuais ======= */
+function hexToRgb(hex){
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  if(!m) return null;
+  return {r:parseInt(m[1],16), g:parseInt(m[2],16), b:parseInt(m[3],16)};
+}
+function luminance({r,g,b}){
+  const srgb=[r,g,b].map(v=>{
+    const x=v/255;
+    return x<=0.03928? x/12.92 : Math.pow((x+0.055)/1.055,2.4);
+  });
+  return 0.2126*srgb[0]+0.7152*srgb[1]+0.0722*srgb[2];
+}
+function suitableInk(bgHex){
+  const rgb=hexToRgb(bgHex); if(!rgb) return "#ffffff";
+  return luminance(rgb) > 0.45 ? "#111111" : "#ffffff"; // limiar de contraste
 }
 
-// ---------------------- Tabs state ----------------------
-let nextId = 1;
-const tabs = new Map(); // id -> { id, tabEl, viewEl, title, url }
-let activeId = null;
+function applyTitlebarColor(hex){
+  const header=document.getElementById("titlebar");
+  header.style.backgroundColor = hex;
+  header.style.borderColor = "#00000044";
+}
 
-// ---------------------- Helpers: WebView/iframe ----------------------
+function cssColorToHex(input){
+  if(!input) return null;
+  const s = String(input).trim();
 
-/** Atribui o estilo exato ao iframe dentro do shadowRoot do webview. */
-function applyIframeFullSize(webviewEl) {
-  if (!webviewEl) return;
+  // já é hex (3 ou 6 dígitos)
+  const mhex = s.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (mhex) {
+    if (mhex[1].length === 3) {
+      // #abc -> #aabbcc
+      const [r,g,b] = mhex[1].split("");
+      return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
+    }
+    return s.toLowerCase();
+  }
 
-  const STYLE_VALUE = "flex: 1 1 auto; height: 100%; width: 100%; border: 0px;";
+  // rgb/rgba
+  const mrgb = s.match(/^rgba?\((\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*(\d*\.?\d+))?\)$/i);
+  if (mrgb) {
+    const r = Math.max(0, Math.min(255, parseInt(mrgb[1],10)));
+    const g = Math.max(0, Math.min(255, parseInt(mrgb[2],10)));
+    const b = Math.max(0, Math.min(255, parseInt(mrgb[3],10)));
+    // se tiver alpha e for muito transparente, deixe null (para tentar outro fallback)
+    if (mrgb[4] != null) {
+      const a = Math.max(0, Math.min(1, parseFloat(mrgb[4])));
+      if (a < 0.05) return null;
+    }
+    const to2 = (v)=>v.toString(16).padStart(2,"0");
+    return `#${to2(r)}${to2(g)}${to2(b)}`;
+  }
 
-  const tryApply = () => {
-    const shadow = webviewEl.shadowRoot;
-    if (!shadow) return false;
-    const iframe = shadow.querySelector("iframe");
-    if (!iframe) return false;
-    iframe.setAttribute("style", STYLE_VALUE);
-    return true;
+  return null;
+}
+
+/** ======= WebView/iframe ======= */
+function applyIframeFullSize(webviewEl){
+  if(!webviewEl) return;
+  const STYLE="flex:1 1 auto;height:100%;width:100%;border:0px;";
+  const tryApply=()=>{
+    const shadow=webviewEl.shadowRoot; if(!shadow) return false;
+    const iframe=shadow.querySelector("iframe"); if(!iframe) return false;
+    iframe.setAttribute("style", STYLE); return true;
   };
-
-  // tenta imediatamente; se não conseguir, faz pequenos retries
-  if (tryApply()) return;
-
-  const id = setInterval(() => {
-    if (tryApply()) clearInterval(id);
-  }, 30);
-  setTimeout(() => clearInterval(id), 3000);
+  if(tryApply()) return;
+  const id=setInterval(()=>{ if(tryApply()) clearInterval(id); },30);
+  setTimeout(()=>clearInterval(id),3000);
+}
+function bindIframeFullSizeHooks(webviewEl){
+  if(!webviewEl) return;
+  const apply=()=>applyIframeFullSize(webviewEl);
+  webviewEl.addEventListener("dom-ready",apply);
+  webviewEl.addEventListener("did-attach",apply);
+  webviewEl.addEventListener("did-stop-loading",apply);
+  apply();
 }
 
-/** Liga eventos que podem recriar o iframe e reaplica o estilo quando necessário. */
-function bindIframeFullSizeHooks(webviewEl) {
-  if (!webviewEl) return;
-  const apply = () => applyIframeFullSize(webviewEl);
-  webviewEl.addEventListener("dom-ready", apply);
-  webviewEl.addEventListener("did-attach", apply);
-  webviewEl.addEventListener("did-stop-loading", apply);
-  apply(); // aplica já na criação
-}
-
-// ---------------------- UI: criação de elementos ----------------------
-
-function createTabEl(tab) {
-  const el = document.createElement("div");
-  el.className = "tab";
-  el.draggable = true;
-  el.dataset.id = String(tab.id);
-  el.innerHTML = `
+/** ======= criar elementos ======= */
+function createTabEl(tab){
+  const el=document.createElement("div");
+  el.className="tab";
+  el.draggable=true;
+  el.dataset.id=String(tab.id);
+  el.innerHTML=`
     <img class="fav" alt="">
     <div class="title">Nova guia</div>
     <button class="close" title="Fechar">✕</button>
   `;
 
-  el.addEventListener("click", (e) => {
-    if (e.target.closest(".close")) return;
+  el.addEventListener("click",(e)=>{
+    if(e.target.closest(".close")) return;
     activateTab(tab.id);
   });
 
-  el.querySelector(".close").addEventListener("click", (e) => {
+  el.querySelector(".close").addEventListener("click",(e)=>{
     e.stopPropagation();
     closeTab(tab.id);
   });
 
-  // drag & drop de abas
-  el.addEventListener("dragstart", (e) => {
+  /* DnD – visual e reordenação */
+  el.addEventListener("dragstart",(e)=>{
+    el.classList.add("drag-ghost");
     e.dataTransfer.setData("text/plain", String(tab.id));
-    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.effectAllowed="move";
   });
-  el.addEventListener("dragover", (e) => e.preventDefault());
-  el.addEventListener("drop", (e) => {
+  el.addEventListener("dragend",()=>el.classList.remove("drag-ghost"));
+  el.addEventListener("dragover",(e)=>{ e.preventDefault();
+    // mostrar se o drop seria antes/depois
+    const rect=el.getBoundingClientRect();
+    const before = (e.clientX - rect.left) < rect.width/2;
+    el.classList.toggle("drop-before", before);
+    el.classList.toggle("drop-after", !before);
+  });
+  el.addEventListener("dragleave",()=>{
+    el.classList.remove("drop-before","drop-after");
+  });
+  el.addEventListener("drop",(e)=>{
     e.preventDefault();
+    el.classList.remove("drop-before","drop-after");
     const fromId = Number(e.dataTransfer.getData("text/plain"));
     const toId   = Number(el.dataset.id);
-    reorderTab(fromId, toId);
+    const rect=el.getBoundingClientRect();
+    const before = (e.clientX - rect.left) < rect.width/2;
+    reorderTab(fromId, toId, before ? "before":"after");
   });
 
   return el;
 }
 
-function createWebview(tab, url) {
-  const view = document.createElement("webview");
-  //view.setAttribute("partition", "persist:wirepeek"); //POR ENQUANTO EU VOU COMENTAR ISSO ENQUANTO NÃO ARRUMO A JANELA...
-  view.setAttribute("allowpopups", "");
-  view.setAttribute("preload", window.__wvPreloadPath || "");
-  view.setAttribute("data-managed-size", ""); // usado pelo fit.js se existir
-  view.setAttribute("width", "0");
-  view.setAttribute("height", "0");
+function createWebview(tab, url){
+  const view=document.createElement("webview");
+  view.setAttribute("allowpopups","");
+  const wvPreload=window.__wvPreloadPath || "";
+  if(wvPreload) view.setAttribute("preload", wvPreload);
+  view.setAttribute("data-managed-size","");
+  view.setAttribute("width","0"); view.setAttribute("height","0");
   view.src = url || "https://www.google.com";
 
-  const wvPreload = window.__wvPreloadPath; // já preenchido no preload.ts
-  if (wvPreload) view.setAttribute("preload", wvPreload);
-
-  // ---- encaminhar eventos de captura do convidado para o main ----
-  view.addEventListener("ipc-message", (e) => {
-    const { channel, args } = e;
-    if (!channel?.startsWith("cap:")) return;
+  // encaminhar captura do convidado → main
+  view.addEventListener("ipc-message",(e)=>{
+    const {channel,args}=e; if(!channel?.startsWith("cap:")) return;
     window.wirepeek?.emitCapture?.(channel, args?.[0] ?? {});
   });
 
-  // Loader no botão recarregar
-  view.addEventListener("did-start-loading", () => btnReload.classList.add("loading"));
-  view.addEventListener("did-stop-loading",  () => btnReload.classList.remove("loading"));
+  // loader
+  view.addEventListener("did-start-loading",()=>btnReload.classList.add("loading"));
+  view.addEventListener("did-stop-loading", ()=>btnReload.classList.remove("loading"));
 
-  // Sincroniza título/URL da aba ativa
-  const sync = () => {
-    const u = (view.getURL && view.getURL()) || tab.url;
-    const t = (view.getTitle && view.getTitle()) || tab.title || u || "Nova guia";
-    tab.url = u; tab.title = t;
-    if (tab.id === activeId) address.value = u || "";
-    updateTabTitleAndFavicon(tab, u, t);
+  // título/url
+  const sync=()=>{
+    const u=(view.getURL&&view.getURL()) || tab.url;
+    const t=(view.getTitle&&view.getTitle()) || tab.title || u || "Nova guia";
+    tab.url=u; tab.title=t;
+    if(tab.id===activeId) address.value=u || "";
+    updateTabTitleAndFavicon(tab,u,t);
     updateNavButtons();
   };
-  ["did-navigate", "did-navigate-in-page", "page-title-updated"].forEach(ev =>
-    view.addEventListener(ev, sync)
-  );
+  ["did-navigate","did-navigate-in-page","page-title-updated"].forEach(ev=>view.addEventListener(ev,sync));
 
-  // Força o iframe do shadowRoot a 100%
+  // pegar cor do site e aplicar (theme-color -> cor visível topo -> neutro)
+  const applyThemeColor = async () => {
+    try {
+      const script = `
+        (() => {
+          // 1) meta theme-color
+          const m = document.querySelector('meta[name="theme-color"]');
+          if (m && m.content) return m.content;
+
+          // 2) tentar a cor *visível* no topo da página
+          const x = Math.max(1, Math.floor(window.innerWidth / 2));
+          const y = 1; // logo abaixo da borda superior
+          let el = document.elementFromPoint(x, y) || document.body || document.documentElement;
+
+          // sobe na árvore até achar uma cor de fundo não-transparente
+          const seen = new Set();
+          while (el && !seen.has(el)) {
+            seen.add(el);
+            const cs = getComputedStyle(el);
+            const bg = cs.backgroundColor || cs.background;
+            if (bg && bg !== "transparent" && bg !== "rgba(0, 0, 0, 0)") {
+              return bg;
+            }
+            el = el.parentElement || el.parentNode;
+          }
+
+          // 3) fallback: body ou html
+          const bodyBg = getComputedStyle(document.body).backgroundColor;
+          if (bodyBg) return bodyBg;
+          const htmlBg = getComputedStyle(document.documentElement).backgroundColor;
+          if (htmlBg) return htmlBg;
+
+          return null;
+        })();
+      `;
+      const picked = await view.executeJavaScript(script, true);
+
+      let baseHex = cssColorToHex(picked);
+      if (!baseHex) baseHex = NEUTRAL_FALLBACK;
+
+      const ink = suitableInk(baseHex);
+      tab.color = baseHex;
+      tab.ink = ink;
+
+      paintTab(tab);
+      if (tab.id === activeId) applyTitlebarColor(baseHex);
+    } catch {
+      const base = NEUTRAL_FALLBACK;
+      const ink  = suitableInk(base);
+      tab.color = base; tab.ink = ink; paintTab(tab);
+      if (tab.id === activeId) applyTitlebarColor(base);
+    }
+  };
+  view.addEventListener("did-finish-load",  applyThemeColor);
+  view.addEventListener("page-title-updated", applyThemeColor);
+  view.addEventListener("did-navigate-in-page", applyThemeColor);
+
   bindIframeFullSizeHooks(view);
-
-  // Garante ajuste de tamanho do webview (se usar fit.js)
-  view.addEventListener("dom-ready", () => window.__resizeWebviewsNow?.());
+  view.addEventListener("dom-ready",()=>window.__resizeWebviewsNow?.());
 
   return view;
 }
 
-// ---------------------- UI: ações sobre abas ----------------------
-
-function updateTabTitleAndFavicon(tab, url, title) {
-  const tabEl = tab.tabEl;
+/** ======= UI e estado ======= */
+function paintTab(tab){
+  const el = tab.tabEl;
+  if(!el) return;
+  const col = tab.color || "#24272b";
+  const ink = tab.ink  || "#ffffff";
+  el.style.setProperty("--tab-col", col);
+  el.style.setProperty("--tab-ink", ink);
+  el.style.color = ink;
+}
+function updateTabTitleAndFavicon(tab, url, title){
+  const tabEl=tab.tabEl;
   tabEl.querySelector(".title").textContent = title || url || "Nova guia";
-  try {
-    const u = new URL(url);
+  try{
+    const u=new URL(url);
     tabEl.querySelector(".fav").src = `${u.origin}/favicon.ico`;
-  } catch {
+  }catch{
     tabEl.querySelector(".fav").src = "favicon.ico";
   }
 }
 
-function addTab(url) {
-  const id  = nextId++;
-  const tab = { id, title: "Nova guia", url: url || "" };
-  tab.tabEl  = createTabEl(tab);
+function addTab(url){
+  const id=nextId++;
+  const tab={ id, title:"Nova guia", url:url||"", color:"#24272b", ink:"#ffffff" };
+  tab.tabEl = createTabEl(tab);
   tab.viewEl = createWebview(tab, url);
 
+  // DOM
   tabstrip.insertBefore(tab.tabEl, btnNewTab);
   webviewsEl.appendChild(tab.viewEl);
 
-  // força dimensionamento antes do primeiro paint (se fit.js estiver presente)
-  requestAnimationFrame(() => window.__resizeWebviewsNow?.());
-
+  // estado
   tabs.set(id, tab);
+  order.push(id);
+
+  requestAnimationFrame(()=>window.__resizeWebviewsNow?.());
   activateTab(id);
   return id;
 }
 
-function activateTab(id) {
-  if (activeId === id) return;
+function activateTab(id){
+  if(activeId===id) return;
 
-  if (activeId != null) {
-    const old = tabs.get(activeId);
-    if (old) { old.tabEl.classList.remove("active"); old.viewEl.classList.remove("active"); }
+  if(activeId!=null){
+    const old=tabs.get(activeId);
+    if(old){ old.tabEl.classList.remove("active"); old.viewEl.classList.remove("active"); }
   }
-
-  activeId = id;
-  const t = tabs.get(id);
-  if (!t) return;
-  t.tabEl.classList.add("active");
-  t.viewEl.classList.add("active");
-  address.value = t.url || "";
+  activeId=id;
+  const t=tabs.get(id); if(!t) return;
+  t.tabEl.classList.add("active"); t.viewEl.classList.add("active");
+  address.value=t.url || "";
   updateNavButtons();
+  paintTab(t);
+  applyTitlebarColor(t.color || "#17181a");
 }
 
-function closeTab(id) {
-  const t = tabs.get(id);
-  if (!t) return;
-  t.tabEl.remove();
-  t.viewEl.remove();
+function closeTab(id){
+  const t=tabs.get(id); if(!t) return;
+  // remove DOM
+  t.tabEl.remove(); t.viewEl.remove();
+  // estado
   tabs.delete(id);
+  const idx=order.indexOf(id);
+  if(idx>=0) order.splice(idx,1);
 
-  if (tabs.size === 0) { addTab("https://www.google.com"); return; }
-  if (activeId === id) {
-    const first = [...tabs.keys()][0];
-    activateTab(first);
+  if(order.length===0){ addTab("https://www.google.com"); return; }
+
+  if(activeId===id){
+    // ativa a aba vizinha mais próxima na ordem
+    const next = order[Math.max(0, idx-1)];
+    activateTab(next);
   }
 }
 
-function reorderTab(fromId, toId) {
-  if (fromId === toId) return;
-  const from = tabs.get(fromId), to = tabs.get(toId);
-  if (!from || !to) return;
-  tabstrip.insertBefore(from.tabEl, to.tabEl);
+function reorderTab(fromId, toId, where /** "before" | "after" */){
+  if(fromId===toId) return;
+  const from=tabs.get(fromId), to=tabs.get(toId);
+  if(!from||!to) return;
+
+  // reordenar DOM (tabs)
+  if(where==="before") tabstrip.insertBefore(from.tabEl, to.tabEl);
+  else tabstrip.insertBefore(from.tabEl, to.tabEl.nextSibling);
+
+  // reordenar DOM (webviews) para manter emparelhado
+  if(where==="before") webviewsEl.insertBefore(from.viewEl, to.viewEl);
+  else webviewsEl.insertBefore(from.viewEl, to.viewEl.nextSibling);
+
+  // reordenar estado (order[])
+  const a=order.indexOf(fromId); if(a<0) return;
+  order.splice(a,1);
+  const b=order.indexOf(toId);
+  order.splice(where==="before"?b:b+1, 0, fromId);
 }
 
-// ---------------------- Navegação ----------------------
-
-function normalizeInputToUrlOrSearch(text) {
-  const raw = (text || "").trim();
-  if (!raw) return "";
-  if (/\s/.test(raw)) return `https://www.google.com/search?q=${encodeURIComponent(raw)}`;
-  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) return `https://${raw}`;
+/** ======= navegação ======= */
+function normalizeInputToUrlOrSearch(text){
+  const raw=(text||"").trim(); if(!raw) return "";
+  if(/\s/.test(raw)) return `https://www.google.com/search?q=${encodeURIComponent(raw)}`;
+  if(!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) return `https://${raw}`;
   return raw;
 }
+function currentView(){ const t=tabs.get(activeId); return t?.viewEl || null; }
+function updateNavButtons(){
+  try{ const v=currentView(); btnBack.disabled=!v?.canGoBack(); btnFwd.disabled=!v?.canGoForward(); }
+  catch{ /* empty */ }
+}
+btnNewTab.addEventListener("click",()=>addTab("https://www.google.com"));
+btnGo.addEventListener("click",goFromAddress);
+address.addEventListener("keydown",(e)=>e.key==="Enter"&&goFromAddress());
+btnBack.addEventListener("click",()=>currentView()?.goBack());
+btnFwd.addEventListener("click", ()=>currentView()?.goForward());
+btnReload.addEventListener("click",()=>currentView()?.reload());
 
-function currentView() {
-  const t = tabs.get(activeId);
-  return t?.viewEl || null;
+function goFromAddress(){
+  const url=normalizeInputToUrlOrSearch(address.value); if(!url) return;
+  const v=currentView(); if(v) v.loadURL(url);
 }
 
-function updateNavButtons() {
-  try {
-    const v = currentView();
-    btnBack.disabled = !v?.canGoBack();
-    btnFwd.disabled  = !v?.canGoForward();
-  } catch { /* noop */ }
+/** ======= captura ======= */
+let capturing=false;
+function renderCaptureState(){
+  btnCap.textContent=capturing?"Parar captura":"Iniciar captura";
+  btnCap.classList.toggle("cap-on", capturing);
+  btnCap.classList.toggle("cap-off",!capturing);
 }
-
-btnNewTab.addEventListener("click", () => addTab("https://www.google.com"));
-btnGo.addEventListener("click", goFromAddress);
-address.addEventListener("keydown", (e) => e.key === "Enter" && goFromAddress());
-btnBack.addEventListener("click", () => currentView()?.goBack());
-btnFwd.addEventListener("click",  () => currentView()?.goForward());
-btnReload.addEventListener("click", () => currentView()?.reload());
-
-function goFromAddress() {
-  const url = normalizeInputToUrlOrSearch(address.value);
-  if (!url) return;
-  const v = currentView();
-  if (v) v.loadURL(url);
-}
-
-// ---------------------- Captura (toggle) ----------------------
-let capturing = false;
-function renderCaptureState() {
-  btnCap.textContent = capturing ? "Parar captura" : "Iniciar captura";
-  btnCap.classList.toggle("cap-on",  capturing);
-  btnCap.classList.toggle("cap-off", !capturing);
-}
-btnCap.addEventListener("click", async () => {
-  try {
-    if (!capturing) { await window.wirepeek?.start(); capturing = true; }
-    else { await window.wirepeek?.stop(); capturing = false; }
+btnCap.addEventListener("click", async ()=>{
+  try{
+    if(!capturing){ await window.wirepeek?.start(); capturing=true; }
+    else { await window.wirepeek?.stop(); capturing=false; }
     renderCaptureState();
-  } catch (err) { console.error("Erro ao alternar captura:", err); }
+  }catch(err){ console.error("Erro ao alternar captura:",err); }
 });
 
-// ---------------------- Bootstrap ----------------------
-window.wirepeek?.onConfig?.(({ targetUrl }) => {
+/** ======= bootstrap ======= */
+window.wirepeek?.onConfig?.(({targetUrl})=>{
   addTab(targetUrl || "https://www.google.com");
-  renderCaptureState();
-  updateNavButtons();
+  renderCaptureState(); updateNavButtons();
 });
+if(!window.wirepeek){ addTab("https://www.google.com"); renderCaptureState(); updateNavButtons(); }
 
-// fallback se preload não mandar nada
-if (!window.wirepeek) {
-  addTab("https://www.google.com");
-  renderCaptureState();
-  updateNavButtons();
-}
-
-// ---------------------- Atalhos ----------------------
+/** ======= atalhos ======= */
 document.addEventListener("keydown",(e)=>{
-  if (e.ctrlKey && e.key.toLowerCase()==="t"){ e.preventDefault(); addTab("https://www.google.com"); }
-  if (e.ctrlKey && e.key.toLowerCase()==="w"){ e.preventDefault(); if (activeId!=null) closeTab(activeId); }
-  if (e.ctrlKey && e.key.toLowerCase()==="l"){ e.preventDefault(); address.select(); }
+  if(e.ctrlKey && e.key.toLowerCase()==="t"){ e.preventDefault(); addTab("https://www.google.com"); }
+  if(e.ctrlKey && e.key.toLowerCase()==="w"){ e.preventDefault(); if(activeId!=null) closeTab(activeId); }
+  if(e.ctrlKey && e.key.toLowerCase()==="l"){ e.preventDefault(); address.select(); }
 });

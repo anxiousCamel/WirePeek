@@ -1,4 +1,5 @@
-﻿/**
+﻿// src/preload/preload.ts
+/**
  * @file src/preload/preload.ts
  * @brief Exposição segura de IPC para a UI (renderer).
  */
