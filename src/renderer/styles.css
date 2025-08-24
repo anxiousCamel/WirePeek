@@ -38,7 +38,7 @@ header.titlebar{
   -webkit-app-region:drag;
   background:var(--chrome-bg);
   border-bottom:1px solid var(--chrome-border);
-  padding:6px 10px 8px;display:flex;flex-direction:column;gap:4px;
+  padding:26px 10px 8px;display:flex;flex-direction:column;gap:4px;
   transition: background-color .2s ease,border-color .2s ease;
 }
 header .nav,header .tabstrip{-webkit-app-region:no-drag}

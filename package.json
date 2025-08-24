@@ -1,41 +1,47 @@
 {
-  "name": "wirepeek-browser",
-  "version": "1.0.0",
-  "description": "Browser Electron com captura (HTTP/WS) integrada - WirePeek",
-  "main": "dist/main/main.js",
-  "scripts": {
-    "dev:ts": "tsc -w --preserveWatchOutput",
-    "dev:electron": "wait-on dist/main/main.js && cross-env NODE_ENV=development electron .",
-    "dev": "concurrently -k \"npm:dev:ts\" \"npm:dev:electron\"",
-    "build": "tsc && electron-builder",
-    "start": "electron .",
-    "lint": "eslint \"src/**/*.ts\""
-  },
-  "dependencies": {
-    "dotenv": "^16.4.5",
-    "electron": "^31.0.0"
-  },
-  "devDependencies": {
-    "@types/node": "^20.12.12",
-    "@typescript-eslint/eslint-plugin": "^7.8.0",
-    "@typescript-eslint/parser": "^7.8.0",
-    "concurrently": "^9.0.0",
-    "cross-env": "^7.0.3",
-    "electron-builder": "^24.13.3",
-    "eslint": "^8.57.0",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.4.5",
-    "wait-on": "^8.0.4"
-  },
-  "build": {
-    "appId": "com.wirepeek.browser",
-    "productName": "WirePeek Browser",
-    "files": [
-      "dist/**/*",
-      "package.json"
-    ],
-    "directories": {
-      "buildResources": "build"
+    "name": "wirepeek-browser",
+    "version": "1.0.0",
+    "description": "Browser Electron com captura (HTTP/WS) integrada - WirePeek",
+    "main": "dist/main/main.js",
+    "scripts": {
+        "dev:ts": "tsc -w --preserveWatchOutput",
+        "dev:electron": "wait-on dist/main/main.js && cross-env NODE_ENV=development electron .",
+        "dev": "concurrently -k \"npm:dev:ts\" \"npm:dev:electron\"",
+        "rebuild": "electron-rebuild -f -w better-sqlite3,keytar",
+        "build": "tsc && electron-builder",
+        "start": "electron .",
+        "lint": "eslint \"src/**/*.ts\""
+    },
+    "dependencies": {
+        "better-sqlite3": "^12.2.0",
+        "dotenv": "^16.4.5",
+        "electron": "^31.0.0",
+        "keytar": "^7.9.0"
+    },
+    "devDependencies": {
+        "@types/better-sqlite3": "^7.6.13",
+        "@types/keytar": "^4.4.0",
+        "@types/node": "^20.12.12",
+        "@typescript-eslint/eslint-plugin": "^7.8.0",
+        "@typescript-eslint/parser": "^7.8.0",
+        "concurrently": "^9.0.0",
+        "cross-env": "^7.0.3",
+        "electron-builder": "^24.13.3",
+        "electron-rebuild": "^3.2.9",
+        "eslint": "^8.57.0",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.4.5",
+        "wait-on": "^8.0.4"
+    },
+    "build": {
+        "appId": "com.wirepeek.browser",
+        "productName": "WirePeek Browser",
+        "files": [
+            "dist/**/*",
+            "package.json"
+        ],
+        "directories": {
+            "buildResources": "build"
+        }
     }
-  }
 }
