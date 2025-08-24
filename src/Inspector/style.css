@@ -1,0 +1,31 @@
+/* @file Inspector/style.css */
+/* layout base */
+html, body, #app { height: 100%; margin: 0; }
+html, body { overflow: hidden; }            /* <- elimina scroll do body (1º scrollbar) */
+.app { display: flex; flex-direction: column; background: #121212; color: #e6e6e6; }
+
+/* titlebar custom */
+.titlebar { height: 32px; display: flex; align-items: center; padding: 0 8px;
+  -webkit-app-region: drag; border-bottom: 1px solid #262626; }
+.titlebar .title { font-size: 12px; opacity: .9; }
+.window-controls { margin-left: auto; display: flex; gap: 6px; -webkit-app-region: no-drag; }
+.window-controls button { width: 36px; height: 22px; border: 0; background: transparent; color: inherit; }
+.window-controls button:hover { background: #1e1e1e; }
+
+/* toolbar fixa */
+.toolbar { flex: 0 0 auto; display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid #1f1f1f; }
+.toolbar input { flex: 1 1 auto; }
+
+/* conteúdo rolável (único scrollbar aqui) */
+.content { flex: 1 1 auto; min-height: 0; overflow: auto; }  /* <- único scrollbar */
+.loglist { list-style: none; margin: 0; padding: 8px; }
+.loglist li { padding: 4px 6px; border-radius: 6px; margin-bottom: 4px; background: #0f1a0f; }
+
+.tx-table { width:100%; border-collapse: collapse; font-size: 12px; }
+.tx-table th, .tx-table td { padding: 4px 6px; border-bottom: 1px solid #1e1e1e; }
+.tx-table tbody tr:hover { background: #182018; cursor: pointer; }
+.details { border-top: 1px solid #1f1f1f; padding: 8px; background:#101010; }
+.hidden { display:none; }
+.tabs { display:flex; gap:6px; margin-bottom:6px; }
+.tab { white-space: pre-wrap; word-break: break-word; }
+.status-2xx { color:#6ad66a; } .status-4xx { color:#ffb347; } .status-5xx { color:#ff6b6b; }

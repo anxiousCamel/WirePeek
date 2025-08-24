@@ -1,5 +1,4 @@
 ﻿/* eslint-env browser */
-
 const $ = (id)=>document.getElementById(id);
 
 const tabstrip   = $("tabstrip");
@@ -15,6 +14,104 @@ const btnCap    = $("btn-capture");
 
 const NEUTRAL_FALLBACK = "#24272b";
 
+/* ======= helpers globais ======= */
+// === ADAPTIVE THEME ===
+const $root = document.documentElement;
+const setVars = (obj) => Object.entries(obj).forEach(([k,v])=> $root.style.setProperty(k, v));
+
+function hexToRgb(hex){
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  if(!m) return null;
+  return {r:parseInt(m[1],16), g:parseInt(m[2],16), b:parseInt(m[3],16)};
+}
+function rgbToHex({r,g,b}){
+  const to2=(v)=>v.toString(16).padStart(2,"0");
+  return `#${to2(r)}${to2(g)}${to2(b)}`;
+}
+function luminance({r,g,b}){
+  const srgb=[r,g,b].map(v=>{
+    const x=v/255;
+    return x<=0.03928? x/12.92 : Math.pow((x+0.055)/1.055,2.4);
+  });
+  return 0.2126*srgb[0]+0.7152*srgb[1]+0.0722*srgb[2];
+}
+function suitableInk(bgHex){
+  const rgb=hexToRgb(bgHex); if(!rgb) return "#ffffff";
+  return luminance(rgb) > 0.45 ? "#111111" : "#ffffff";
+}
+function mixHex(a,b,t){ // t: 0..1
+  const ca=hexToRgb(a), cb=hexToRgb(b); if(!ca||!cb) return a;
+  const mix=(x,y)=>Math.round(x*(1-t)+y*t);
+  return rgbToHex({r:mix(ca.r,cb.r), g:mix(ca.g,cb.g), b:mix(ca.b,cb.b)});
+}
+// converte "rgb(...)" ou "#abc/abcdef" em "#rrggbb"
+function cssColorToHex(input){
+  if(!input) return null;
+  const s=String(input).trim();
+  const mhex=s.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if(mhex){
+    if(mhex[1].length===3){
+      const [r,g,b]=mhex[1].split("");
+      return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
+    }
+    return s.toLowerCase();
+  }
+  const mrgb=s.match(/^rgba?\((\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*(\d*\.?\d+))?\)$/i);
+  if(mrgb){
+    const r=Math.max(0,Math.min(255,parseInt(mrgb[1],10)));
+    const g=Math.max(0,Math.min(255,parseInt(mrgb[2],10)));
+    const b=Math.max(0,Math.min(255,parseInt(mrgb[3],10)));
+    if(mrgb[4]!=null){ const a=Math.max(0,Math.min(1,parseFloat(mrgb[4]))); if(a<0.05) return null; }
+    return rgbToHex({r,g,b});
+  }
+  return null;
+}
+
+/* ======= título/janela ======= */
+// === ADAPTIVE THEME ===
+function applyChromeTheme(baseHex){
+  if(!baseHex) baseHex = NEUTRAL_FALLBACK;
+
+  const ink = suitableInk(baseHex);
+  // regra: se fundo é escuro -> clarear hover/active; se claro -> escurecer
+  const lift = (ink==="#ffffff") ? "#ffffff" : "#000000";
+  const push = (ink==="#ffffff") ? "#000000" : "#ffffff";
+
+  const tabHover  = mixHex(baseHex, lift, 0.08);
+  const tabActive = mixHex(baseHex, lift, 0.12);
+
+  const btnBg     = mixHex(baseHex, push, 0.10);
+  const btnHover  = mixHex(btnBg,   lift, 0.08);
+  const btnInk    = suitableInk(btnBg);
+  const btnBorder = mixHex(btnBg,   ink,  0.35);
+
+  const fieldBg     = mixHex(baseHex, push, 0.18);
+  const fieldInk    = suitableInk(fieldBg);
+  const fieldBorder = mixHex(fieldBg,  ink,  0.35);
+
+  const chromeBorder = mixHex(baseHex, ink, 0.30);
+
+  setVars({
+    "--chrome-bg": baseHex,
+    "--chrome-ink": ink,
+    "--chrome-border": chromeBorder,
+
+    "--tab-bg": baseHex,
+    "--tab-hover": tabHover,
+    "--tab-active": tabActive,
+
+    "--btn-bg": btnBg,
+    "--btn-ink": btnInk,
+    "--btn-hover": btnHover,
+    "--btn-border": btnBorder,
+
+    "--field-bg": fieldBg,
+    "--field-ink": fieldInk,
+    "--field-border": fieldBorder
+  });
+}
+
+/* ======= janela (ícones) ======= */
 $("win-min").addEventListener("click",()=>window.win?.minimize());
 $("win-close").addEventListener("click",()=>window.win?.close());
 $("win-max").addEventListener("click",async()=>{
@@ -29,63 +126,6 @@ let nextId=1;
 const tabs=new Map(); // id -> { id, tabEl, viewEl, title, url, color, ink }
 let order=[];         // array de ids na ordem visual
 let activeId=null;
-
-/** ======= helpers visuais ======= */
-function hexToRgb(hex){
-  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  if(!m) return null;
-  return {r:parseInt(m[1],16), g:parseInt(m[2],16), b:parseInt(m[3],16)};
-}
-function luminance({r,g,b}){
-  const srgb=[r,g,b].map(v=>{
-    const x=v/255;
-    return x<=0.03928? x/12.92 : Math.pow((x+0.055)/1.055,2.4);
-  });
-  return 0.2126*srgb[0]+0.7152*srgb[1]+0.0722*srgb[2];
-}
-function suitableInk(bgHex){
-  const rgb=hexToRgb(bgHex); if(!rgb) return "#ffffff";
-  return luminance(rgb) > 0.45 ? "#111111" : "#ffffff"; // limiar de contraste
-}
-
-function applyTitlebarColor(hex){
-  const header=document.getElementById("titlebar");
-  header.style.backgroundColor = hex;
-  header.style.borderColor = "#00000044";
-}
-
-function cssColorToHex(input){
-  if(!input) return null;
-  const s = String(input).trim();
-
-  // já é hex (3 ou 6 dígitos)
-  const mhex = s.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
-  if (mhex) {
-    if (mhex[1].length === 3) {
-      // #abc -> #aabbcc
-      const [r,g,b] = mhex[1].split("");
-      return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
-    }
-    return s.toLowerCase();
-  }
-
-  // rgb/rgba
-  const mrgb = s.match(/^rgba?\((\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*(\d*\.?\d+))?\)$/i);
-  if (mrgb) {
-    const r = Math.max(0, Math.min(255, parseInt(mrgb[1],10)));
-    const g = Math.max(0, Math.min(255, parseInt(mrgb[2],10)));
-    const b = Math.max(0, Math.min(255, parseInt(mrgb[3],10)));
-    // se tiver alpha e for muito transparente, deixe null (para tentar outro fallback)
-    if (mrgb[4] != null) {
-      const a = Math.max(0, Math.min(1, parseFloat(mrgb[4])));
-      if (a < 0.05) return null;
-    }
-    const to2 = (v)=>v.toString(16).padStart(2,"0");
-    return `#${to2(r)}${to2(g)}${to2(b)}`;
-  }
-
-  return null;
-}
 
 /** ======= WebView/iframe ======= */
 function applyIframeFullSize(webviewEl){
@@ -139,15 +179,12 @@ function createTabEl(tab){
   });
   el.addEventListener("dragend",()=>el.classList.remove("drag-ghost"));
   el.addEventListener("dragover",(e)=>{ e.preventDefault();
-    // mostrar se o drop seria antes/depois
     const rect=el.getBoundingClientRect();
     const before = (e.clientX - rect.left) < rect.width/2;
     el.classList.toggle("drop-before", before);
     el.classList.toggle("drop-after", !before);
   });
-  el.addEventListener("dragleave",()=>{
-    el.classList.remove("drop-before","drop-after");
-  });
+  el.addEventListener("dragleave",()=>{ el.classList.remove("drop-before","drop-after"); });
   el.addEventListener("drop",(e)=>{
     e.preventDefault();
     el.classList.remove("drop-before","drop-after");
@@ -191,7 +228,7 @@ function createWebview(tab, url){
   };
   ["did-navigate","did-navigate-in-page","page-title-updated"].forEach(ev=>view.addEventListener(ev,sync));
 
-  // pegar cor do site e aplicar (theme-color -> cor visível topo -> neutro)
+  // === ADAPTIVE THEME ===
   const applyThemeColor = async () => {
     try {
       const script = `
@@ -200,48 +237,39 @@ function createWebview(tab, url){
           const m = document.querySelector('meta[name="theme-color"]');
           if (m && m.content) return m.content;
 
-          // 2) tentar a cor *visível* no topo da página
+          // 2) cor visível perto do topo
           const x = Math.max(1, Math.floor(window.innerWidth / 2));
-          const y = 1; // logo abaixo da borda superior
+          const y = 1;
           let el = document.elementFromPoint(x, y) || document.body || document.documentElement;
-
-          // sobe na árvore até achar uma cor de fundo não-transparente
           const seen = new Set();
           while (el && !seen.has(el)) {
             seen.add(el);
             const cs = getComputedStyle(el);
             const bg = cs.backgroundColor || cs.background;
-            if (bg && bg !== "transparent" && bg !== "rgba(0, 0, 0, 0)") {
-              return bg;
-            }
+            if (bg && bg !== "transparent" && bg !== "rgba(0, 0, 0, 0)") return bg;
             el = el.parentElement || el.parentNode;
           }
-
-          // 3) fallback: body ou html
+          // 3) fallback: body/html
           const bodyBg = getComputedStyle(document.body).backgroundColor;
           if (bodyBg) return bodyBg;
           const htmlBg = getComputedStyle(document.documentElement).backgroundColor;
           if (htmlBg) return htmlBg;
-
           return null;
         })();
       `;
       const picked = await view.executeJavaScript(script, true);
-
-      let baseHex = cssColorToHex(picked);
-      if (!baseHex) baseHex = NEUTRAL_FALLBACK;
+      let baseHex = cssColorToHex(picked) || NEUTRAL_FALLBACK;
 
       const ink = suitableInk(baseHex);
       tab.color = baseHex;
-      tab.ink = ink;
+      tab.ink   = ink;
 
       paintTab(tab);
-      if (tab.id === activeId) applyTitlebarColor(baseHex);
+      if (tab.id === activeId) applyChromeTheme(baseHex);
     } catch {
       const base = NEUTRAL_FALLBACK;
-      const ink  = suitableInk(base);
-      tab.color = base; tab.ink = ink; paintTab(tab);
-      if (tab.id === activeId) applyTitlebarColor(base);
+      tab.color = base; tab.ink = suitableInk(base); paintTab(tab);
+      if (tab.id === activeId) applyChromeTheme(base);
     }
   };
   view.addEventListener("did-finish-load",  applyThemeColor);
@@ -258,7 +286,7 @@ function createWebview(tab, url){
 function paintTab(tab){
   const el = tab.tabEl;
   if(!el) return;
-  const col = tab.color || "#24272b";
+  const col = tab.color || NEUTRAL_FALLBACK;
   const ink = tab.ink  || "#ffffff";
   el.style.setProperty("--tab-col", col);
   el.style.setProperty("--tab-ink", ink);
@@ -277,15 +305,13 @@ function updateTabTitleAndFavicon(tab, url, title){
 
 function addTab(url){
   const id=nextId++;
-  const tab={ id, title:"Nova guia", url:url||"", color:"#24272b", ink:"#ffffff" };
+  const tab={ id, title:"Nova guia", url:url||"", color:NEUTRAL_FALLBACK, ink:"#ffffff" };
   tab.tabEl = createTabEl(tab);
   tab.viewEl = createWebview(tab, url);
 
-  // DOM
   tabstrip.insertBefore(tab.tabEl, btnNewTab);
   webviewsEl.appendChild(tab.viewEl);
 
-  // estado
   tabs.set(id, tab);
   order.push(id);
 
@@ -307,14 +333,14 @@ function activateTab(id){
   address.value=t.url || "";
   updateNavButtons();
   paintTab(t);
-  applyTitlebarColor(t.color || "#17181a");
+
+  // === ADAPTIVE THEME ===
+  applyChromeTheme(t.color || NEUTRAL_FALLBACK);
 }
 
 function closeTab(id){
   const t=tabs.get(id); if(!t) return;
-  // remove DOM
   t.tabEl.remove(); t.viewEl.remove();
-  // estado
   tabs.delete(id);
   const idx=order.indexOf(id);
   if(idx>=0) order.splice(idx,1);
@@ -322,26 +348,22 @@ function closeTab(id){
   if(order.length===0){ addTab("https://www.google.com"); return; }
 
   if(activeId===id){
-    // ativa a aba vizinha mais próxima na ordem
     const next = order[Math.max(0, idx-1)];
     activateTab(next);
   }
 }
 
-function reorderTab(fromId, toId, where /** "before" | "after" */){
+function reorderTab(fromId, toId, where){
   if(fromId===toId) return;
   const from=tabs.get(fromId), to=tabs.get(toId);
   if(!from||!to) return;
 
-  // reordenar DOM (tabs)
   if(where==="before") tabstrip.insertBefore(from.tabEl, to.tabEl);
   else tabstrip.insertBefore(from.tabEl, to.tabEl.nextSibling);
 
-  // reordenar DOM (webviews) para manter emparelhado
   if(where==="before") webviewsEl.insertBefore(from.viewEl, to.viewEl);
   else webviewsEl.insertBefore(from.viewEl, to.viewEl.nextSibling);
 
-  // reordenar estado (order[])
   const a=order.indexOf(fromId); if(a<0) return;
   order.splice(a,1);
   const b=order.indexOf(toId);
@@ -372,19 +394,43 @@ function goFromAddress(){
   const v=currentView(); if(v) v.loadURL(url);
 }
 
-/** ======= captura ======= */
-let capturing=false;
+// ======= captura =======
+let capturing = false;
+
+/** Atualiza o visual do botão de captura. */
 function renderCaptureState(){
-  btnCap.textContent=capturing?"Parar captura":"Iniciar captura";
-  btnCap.classList.toggle("cap-on", capturing);
-  btnCap.classList.toggle("cap-off",!capturing);
+  btnCap.classList.toggle("cap-on",  capturing);
+  btnCap.classList.toggle("cap-off", !capturing);
+  btnCap.setAttribute("aria-pressed", capturing ? "true" : "false");
 }
-btnCap.addEventListener("click", async ()=>{
-  try{
-    if(!capturing){ await window.wirepeek?.start(); capturing=true; }
-    else { await window.wirepeek?.stop(); capturing=false; }
+
+window.addEventListener("DOMContentLoaded", async () => {
+  try {
+    const s = await window.wirepeek?.getState?.();
+    capturing = !!s?.capturing;
     renderCaptureState();
-  }catch(err){ console.error("Erro ao alternar captura:",err); }
+  } catch {
+    // sem ação
+  }
+
+  // Mantém sincronizado quando o main broadcastar cap:state
+  window.wirepeek?.onState?.((s) => {
+    capturing = !!s.capturing;
+    renderCaptureState();
+  });
+});
+
+/** Clique do botão: usa start/stop (não existe mais 'toggle'). */
+btnCap.addEventListener("click", async () => {
+  try {
+    const s = capturing
+      ? await window.wirepeek?.stop?.()
+      : await window.wirepeek?.start?.(); // o main abre o Inspetor ao iniciar
+    capturing = !!s?.capturing;
+    renderCaptureState();
+  } catch (e) {
+    console.error("[cap] erro ao alternar:", e);
+  }
 });
 
 /** ======= bootstrap ======= */
@@ -392,7 +438,10 @@ window.wirepeek?.onConfig?.(({targetUrl})=>{
   addTab(targetUrl || "https://www.google.com");
   renderCaptureState(); updateNavButtons();
 });
-if(!window.wirepeek){ addTab("https://www.google.com"); renderCaptureState(); updateNavButtons(); }
+if(!window.wirepeek){
+  addTab("https://www.google.com");
+  renderCaptureState(); updateNavButtons();
+}
 
 /** ======= atalhos ======= */
 document.addEventListener("keydown",(e)=>{

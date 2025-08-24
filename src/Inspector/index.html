@@ -1,0 +1,55 @@
+<!-- @file Inspector/index.html -->
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>WirePeek Inspector</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+<div id="app" class="app">
+
+  <!-- Titlebar custom -->
+  <header class="titlebar" aria-label="Barra de título">
+    <div class="title">WirePeek Inspector</div>
+    <div class="window-controls" role="group" aria-label="Controles de janela">
+      <button id="win-max"  title="Maximizar/Restaurar" aria-label="Maximizar">□</button>
+      <button id="win-close" title="Fechar" aria-label="Fechar">×</button>
+    </div>
+  </header>
+
+  <!-- Toolbar/Filter -->
+  <div class="toolbar">
+    <input id="filter" type="text" placeholder="filtrar (URL, método, código, WS id/dir)..." />
+    <button id="btn-clear" title="Limpar">Limpar</button>
+  </div>
+
+  <!-- Área com UM único scrollbar -->
+  <main id="scroller" class="content" role="region" aria-label="Capturas">
+  <table id="tx-table" class="tx-table">
+    <thead>
+      <tr>
+        <th>Time</th><th>Método</th><th>Status</th><th>Host</th><th>Path</th><th>ms</th><th>Tamanho</th>
+      </tr>
+    </thead>
+    <tbody id="tx-body"></tbody>
+  </table>
+
+  <section id="details" class="details hidden">
+    <header><h3 id="det-title"></h3></header>
+    <nav class="tabs">
+      <button data-tab="req">Request</button>
+      <button data-tab="resp">Response</button>
+      <button data-tab="curl">cURL</button>
+    </nav>
+    <pre id="tab-req"  class="tab"></pre>
+    <pre id="tab-resp" class="tab hidden"></pre>
+    <pre id="tab-curl" class="tab hidden"></pre>
+  </section>
+</main>
+
+
+</div>
+<script src="./ui.js" type="module"></script>
+</body>
+</html>

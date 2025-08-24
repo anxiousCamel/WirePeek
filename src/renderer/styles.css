@@ -1,25 +1,43 @@
 :root{
   --win-bg:#0f0f10;
+
+  /* cromado adaptativo (preenchidos pelo JS) */
   --chrome-bg:#17181a;
   --chrome-ink:#eaeaea;
   --chrome-muted:#9aa0a6;
+  --chrome-border:#232427;
+
+  /* tabs (a aba ativa injeta --tab-col/--tab-ink por elemento) */
   --tab-bg:#1d1f22;
-  --tab-active:#24272b;
-  --tab-hover:#2a2e33;
+  --tab-active:#24272b;   /* derivado no JS */
+  --tab-hover:#2a2e33;    /* derivado no JS */
+
+  /* botões e campo (derivados no JS) */
+  --btn-bg:#1b1e22;
+  --btn-ink:#eaeaea;
+  --btn-border:#2e3238;
+  --btn-hover:#252a31;
+
+  --field-bg:#111214;
+  --field-ink:#eaeaea;
+  --field-border:#2e3238;
+
   --accent:#7c39ff;
-  --danger:#e05151;
-  --header-h: 120px; /* fallback, ajustado via fit.js */
+  --danger:#ff2929;
+  --header-h:120px;
 }
 
 /* layout base */
-html,body{margin:0;height:100dvh;background:var(--win-bg);color:var(--chrome-ink);
-  font:13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;overflow:hidden}
+html,body{
+  margin:0;height:100dvh;background:var(--win-bg);color:var(--chrome-ink);
+  font:13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;overflow:hidden;
+}
 
 /* ===== titlebar ===== */
 header.titlebar{
   -webkit-app-region:drag;
   background:var(--chrome-bg);
-  border-bottom:1px solid #232427;
+  border-bottom:1px solid var(--chrome-border);
   padding:6px 10px 8px;display:flex;flex-direction:column;gap:4px;
   transition: background-color .2s ease,border-color .2s ease;
 }
@@ -27,16 +45,39 @@ header .nav,header .tabstrip{-webkit-app-region:no-drag}
 
 /* nav */
 .nav{display:flex;align-items:center;gap:8px;height:46px}
-button.icon{min-width:32px;height:32px;border-radius:999px;border:1px solid #2e3238;
-  background:#1b1e22;color:var(--chrome-ink);transition:background .15s,border-color .15s,transform .05s}
-button.icon:hover{background:#252a31;border-color:#3a3e45}
+
+button.icon{
+  min-width:24px;height:24px;border-radius:999px;
+  border:1px solid var(--btn-border);
+  background:var(--btn-bg);color:var(--btn-ink);
+  transition:background .15s,border-color .15s,transform .05s;
+}
+button.icon:hover{background:var(--btn-hover);border-color:var(--btn-border)}
 button.icon:active{transform:translateY(1px)}
-#address{flex:1;height:36px;border-radius:22px;padding:0 14px;border:1px solid #2e3238;background:#111214;color:var(--chrome-ink)}
-#address:focus{border-color:#3c4149;outline:2px solid #3c414944}
-.go{height:32px;border-radius:18px;background:#2a2e35;border:1px solid #363b44}
-.cap{height:32px;border-radius:18px;font-weight:600}
-.cap-off{background:#2a2e35;border:1px solid #363b44}
-.cap-on{background:var(--accent);border:1px solid var(--accent)}
+
+#address{
+  flex:1;height:36px;border-radius:22px;padding:0 14px;
+  border:1px solid var(--field-border);
+  background:var(--field-bg);color:var(--field-ink);
+  caret-color:var(--field-ink);
+}
+#address:focus{border-color:var(--btn-border);outline:2px solid #3c414944}
+
+.go{
+  height:24px;border-radius:18px;
+  background:var(--btn-bg);color:var(--btn-ink);
+  border:1px solid var(--btn-border);
+}
+.go:hover{background:var(--btn-hover)}
+
+.cap{
+  height:24px;border-radius:18px;font-weight:600;
+  background:var(--btn-bg);color:var(--btn-ink);
+  border:1px solid var(--btn-border);
+}
+.cap-off{background:var(--btn-bg);border:1px solid var(--btn-border)}
+.cap-off:hover{background:var(--btn-hover)}
+.cap-on{background:var(--accent);border:1px solid var(--accent);color:#fff}
 
 /* tabs */
 .tabstrip{display:flex;align-items:center;gap:4px;height:36px}
@@ -65,10 +106,14 @@ button.icon:active{transform:translateY(1px)}
 
 /* window controls */
 .window-controls{display:flex;gap:6px}
-.window-controls .wc{width:34px;height:28px;border-radius:8px;border:1px solid #2f3339;background:#1b1e22}
-.window-controls .wc:hover{background:#262b32}
-.window-controls .danger{background:#2a1518;border-color:#3a2226;color:#ffd7d7}
-.window-controls .danger:hover{background:#371a1f}
+.window-controls .wc{
+  width:34px;height:28px;border-radius:8px;
+  border:1px solid var(--btn-border);background:var(--btn-bg);color:var(--btn-ink)
+}
+.window-controls .wc:hover{background:var(--btn-hover)}
+.window-controls .danger{ background:#e05151;border-color:#b73a3a;color:#fff }
+.window-controls .danger:hover{ background:#ff6a6a;border-color:#c24343 }
+.window-controls .danger:active{ background:#c74343;border-color:#a53535 }
 
 /* conteúdo */
 #webviews{position:fixed;top:var(--header-h);left:0;right:0;bottom:0;overflow:hidden}
