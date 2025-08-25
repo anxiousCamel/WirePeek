@@ -8,5 +8,17 @@
   "ignorePatterns": ["dist/**"],
   "rules": {
     "@typescript-eslint/no-unused-vars": ["error", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }]
-  }
+  },
+  "overrides": [
+    {
+      "files": ["src/renderer/js/**/*.js"],
+      "env": { "browser": true, "es2020": true },
+      "plugins": [],
+      "extends": ["eslint:recommended"],
+      "rules": {
+        "no-undef": "off",
+        "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }]
+      }
+    }
+  ]
 }

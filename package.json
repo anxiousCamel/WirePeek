@@ -8,7 +8,7 @@
     "dev:electron": "wait-on dist/main/main.js && cross-env NODE_ENV=development electron .",
     "dev": "concurrently -k \"npm:dev:ts\" \"npm:dev:electron\"",
     "rebuild": "electron-rebuild -f -w better-sqlite3,keytar",
-    "copy:renderer": "copyfiles -u 2 \"src/renderer/**/*.css\" dist/renderer && copyfiles -u 2 \"src/renderer/index.html\" dist/renderer",
+    "copy:renderer": "copyfiles -u 2 \"src/renderer/**/*.css\" \"src/renderer/**/*.html\" \"src/renderer/js/**/*.js\" dist/renderer",
     "build": "tsc && npm run copy:renderer && electron-builder",
     "start": "electron .",
     "lint": "eslint \"src/**/*.ts\""

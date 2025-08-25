@@ -1,0 +1,4 @@
+/* conteúdo */
+#webviews{position:fixed;top:var(--header-h);left:0;right:0;bottom:0;overflow:hidden}
+#webviews>webview{width:100%;height:100%;border:none;display:none;background:#000}
+#webviews>webview.active{display:block}
