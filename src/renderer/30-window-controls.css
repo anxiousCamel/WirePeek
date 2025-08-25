@@ -1,0 +1,10 @@
+/* window controls */
+.window-controls{display:flex;gap:6px}
+.window-controls .wc{
+    width:34px;height:28px;border-radius:8px;
+    border:1px solid var(--btn-border);background:var(--btn-bg);color:var(--btn-ink)
+}
+.window-controls .wc:hover{background:var(--btn-hover)}
+.window-controls .danger{ background:#e05151;border-color:#b73a3a;color:#fff }
+.window-controls .danger:hover{ background:#ff6a6a;border-color:#c24343 }
+.window-controls .danger:active{ background:#c74343;border-color:#a53535 }

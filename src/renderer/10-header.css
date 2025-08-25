@@ -1,0 +1,70 @@
+/* ===== titlebar ===== */
+header.titlebar{
+    -webkit-app-region:drag;
+    background:var(--chrome-bg);
+    border-bottom:1px solid var(--chrome-border);
+    padding:26px 10px 8px;display:flex;flex-direction:column;gap:4px;
+    transition: background-color .2s ease,border-color .2s ease;
+}
+header .nav,header .tabstrip{-webkit-app-region:no-drag}
+
+/* nav */
+.nav{display:flex;align-items:center;gap:8px;height:46px}
+
+button.icon{
+    min-width:24px;height:24px;border-radius:999px;
+    border:1px solid var(--btn-border);
+    background:var(--btn-bg);color:var(--btn-ink);
+    transition:background .15s,border-color .15s,transform .05s;
+}
+button.icon:hover{background:var(--btn-hover);border-color:var(--btn-border)}
+button.icon:active{transform:translateY(1px)}
+
+/* Omnibox */
+#address{
+    flex:1;height:36px;border-radius:22px;padding:0 14px;
+    border:1px solid var(--field-border);
+    background:var(--field-bg);color:var(--field-ink);
+    caret-color:var(--field-ink);
+}
+#address:focus{border-color:var(--btn-border);outline:2px solid #3c414944}
+
+.go{
+    height:24px;border-radius:18px;
+    background:var(--btn-bg);color:var(--btn-ink);
+    border:1px solid var(--btn-border);
+}
+.go:hover{background:var(--btn-hover)}
+
+.cap{
+    height:24px;border-radius:18px;font-weight:600;
+    background:var(--btn-bg);color:var(--btn-ink);
+    border:1px solid var(--btn-border);
+}
+.cap-off{background:var(--btn-bg);border:1px solid var(--btn-border)}
+.cap-off:hover{background:var(--btn-hover)}
+.cap-on{background:var(--accent);border:1px solid var(--accent);color:#fff}
+
+/* Botão do motor de busca */
+#engine-btn{
+    height:28px; padding:0 10px; border-radius:14px;
+    border:1px solid var(--btn-border);
+    background:var(--btn-bg); color:var(--btn-ink);
+    cursor:pointer; user-select:none;
+    transition:background .15s,border-color .15s,transform .05s;
+}
+#engine-btn:hover{ background:var(--btn-hover) }
+#engine-btn:active{ transform:translateY(1px) }
+
+/* Menu do engine (context menu) */
+.engine-menu{
+    position:fixed; z-index:9999; min-width:180px;
+    background:#1e1f22; border:1px solid #363636; border-radius:10px;
+    box-shadow:0 10px 24px #0008; padding:6px;
+}
+.engine-item{
+    padding:8px 10px; border-radius:8px; color:var(--chrome-ink);
+    cursor:pointer;
+}
+.engine-item:hover{ background:#2a2e33 }
+.engine-item.active::before{ content:"✓ "; color:#7cdd8b }

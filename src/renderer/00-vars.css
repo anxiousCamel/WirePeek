@@ -1,0 +1,34 @@
+:root{
+    --win-bg:#0f0f10;
+
+  /* cromado adaptativo (preenchidos pelo JS) */
+    --chrome-bg:#17181a;
+    --chrome-ink:#eaeaea;
+    --chrome-muted:#9aa0a6;
+    --chrome-border:#232427;
+
+  /* tabs */
+    --tab-bg:#1d1f22;
+    --tab-active:#24272b;
+    --tab-hover:#2a2e33;
+
+  /* botões e campo */
+    --btn-bg:#1b1e22;
+    --btn-ink:#eaeaea;
+    --btn-border:#2e3238;
+    --btn-hover:#252a31;
+
+    --field-bg:#111214;
+    --field-ink:#eaeaea;
+    --field-border:#2e3238;
+
+    --accent:#7c39ff;
+    --danger:#ff2929;
+    --header-h:120px;
+}
+
+/* layout base */
+html,body{
+    margin:0;height:100dvh;background:var(--win-bg);color:var(--chrome-ink);
+    font:13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;overflow:hidden;
+}
