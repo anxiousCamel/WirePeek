@@ -2,18 +2,22 @@
 <html lang="pt-BR">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>WirePeek Browser</title>
 
-    <!-- CSP compatível (scripts somente externos) -->
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self';
-                  img-src 'self' https: data:;
-                  style-src 'self' 'unsafe-inline';
-                  script-src 'self';
-                  frame-src https: http:;
-                  connect-src https: http:"
+    <!-- CSP (scripts/estilos locais; conteúdo remoto só via webview) -->
+    <meta http-equiv="Content-Security-Policy"
+      content="
+        default-src 'self';
+        img-src 'self' https: data:;
+        style-src 'self' 'unsafe-inline';
+        script-src 'self';
+        frame-src https: http:;
+        connect-src https: http:;
+      "
     />
+
+    <!-- CSS (modular) -->
     <link rel="stylesheet" href="./styles/00-vars.css" />
     <link rel="stylesheet" href="./styles/10-header.css" />
     <link rel="stylesheet" href="./styles/20-tabs.css" />
@@ -21,81 +25,73 @@
     <link rel="stylesheet" href="./styles/40-content.css" />
     <link rel="stylesheet" href="./styles/99-scrollbar.css" />
   </head>
+
   <body>
     <header class="titlebar" id="titlebar">
-      <!-- OMNIBOX / TOOLBAR -->
-      <div class="nav">
-        <button id="btn-back" class="icon" title="Voltar">←</button>
-        <button id="btn-fwd" class="icon" title="Avançar">→</button>
-        <button id="btn-reload" class="icon" title="Recarregar">⟳</button>
-
-        <input
-          id="address"
-          type="text"
-          placeholder="Pesquisar ou digitar URL"
-        />
-        <button id="btn-go" class="go">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="16"
-            height="16"
-            fill="currentColor"
-            class="bi bi-search"
-            viewBox="0 0 16 16"
-          >
-            <path
-              d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001q.044.06.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1 1 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0"
-            />
-          </svg>
-        </button>
-
-        <button
-          id="btn-capture"
-          class="cap cap-off"
-          aria-pressed="false"
-          title="Iniciar captura"
-        >
-          <!-- 1 único ícone -->
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="16"
-            height="16"
-            fill="currentColor"
-            viewBox="0 0 16 16"
-            aria-hidden="true"
-          >
-            <!-- bullseye -->
-            <path
-              d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14m0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16"
-            />
-            <path
-              d="M8 13A5 5 0 1 1 8 3a5 5 0 0 1 0 10m0 1A6 6 0 1 0 8 2a6 6 0 0 0 0 12"
-            />
-            <path
-              d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6m0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8"
-            />
-            <path d="M9.5 8a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0" />
-          </svg>
-          <span class="sr-only"></span>
-        </button>
-
-        <div class="window-controls">
-          <button id="win-min" class="wc" title="Minimizar">🗕</button>
-          <button id="win-max" class="wc" title="Maximizar">🗖</button>
-          <button id="win-close" class="wc danger" title="Fechar">🗙</button>
+      <!-- ===== Toolbar / Omnibox ===== -->
+      <nav class="nav" role="toolbar" aria-label="Barra de navegação">
+        <!-- Histórico -->
+        <div class="nav-group">
+          <button id="btn-back"   class="icon" title="Voltar"   aria-label="Voltar">←</button>
+          <button id="btn-fwd"    class="icon" title="Avançar"  aria-label="Avançar">→</button>
+          <button id="btn-reload" class="icon" title="Recarregar" aria-label="Recarregar">⟳</button>
         </div>
-      </div>
 
-      <!-- TABS -->
-      <div class="tabstrip" id="tabstrip">
-        <button class="tab-new" id="tab-new" title="Nova guia">＋</button>
+        <!-- Motor + endereço -->
+        <div class="nav-group" style="flex:1; display:flex; gap:8px; align-items:center;">
+          <button id="engine-btn" title="Motor de busca (Alt+S)" aria-label="Alternar motor de busca">
+            Google ▾
+          </button>
+
+          <input
+            id="address"
+            type="text"
+            placeholder="Pesquisar ou digitar URL"
+            autocomplete="off"
+            spellcheck="false"
+            aria-label="Barra de endereço e pesquisa"
+            style="flex:1"
+          />
+
+          <button id="btn-go" class="go" title="Ir" aria-label="Ir">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"
+                 viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001q.044.06.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1 1 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0"/>
+            </svg>
+          </button>
+        </div>
+
+        <!-- Captura + controles da janela -->
+        <div class="nav-group" style="display:flex; gap:8px; align-items:center;">
+          <button id="btn-capture" class="cap cap-off" aria-pressed="false" title="Iniciar captura" aria-label="Iniciar captura">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"
+                 viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14m0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16"/>
+              <path d="M8 13A5 5 0 1 1 8 3a5 5 0 0 1 0 10m0 1A6 6 0 1 0 8 2a6 6 0 0 0 0 12"/>
+              <path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6m0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8"/>
+              <path d="M9.5 8a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0"/>
+            </svg>
+          </button>
+
+          <div class="window-controls">
+            <button id="win-min"   class="wc"        title="Minimizar" aria-label="Minimizar">🗕</button>
+            <button id="win-max"   class="wc"        title="Maximizar" aria-label="Maximizar">🗖</button>
+            <button id="win-close" class="wc danger" title="Fechar"    aria-label="Fechar">🗙</button>
+          </div>
+        </div>
+      </nav>
+
+      <!-- ===== Abas ===== -->
+      <div class="tabstrip" id="tabstrip" role="tablist" aria-label="Abas">
+        <button class="tab-new" id="tab-new" title="Nova guia" aria-label="Nova guia">＋</button>
       </div>
     </header>
 
-    <!-- Área de conteúdo: vamos fixar por JS + CSS -->
-    <div id="webviews"></div>
+    <!-- ===== Conteúdo ===== -->
+    <main id="webviews" role="main"></main>
 
-    <!-- Medidor de header deve vir ANTES do ui.js -->
+    <!-- Scripts (módulos) -->
+    <script src="./js/fit.js"></script>
     <script type="module" src="./js/main.js"></script>
   </body>
 </html>

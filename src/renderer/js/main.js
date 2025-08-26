@@ -14,7 +14,7 @@ window.win?.onMaximizedChange?.((isMax) => setMaxButtonIcon(isMax));
 function setMaxButtonIcon(isMax) { const b = el.winMax; if (!b) return; b.textContent = isMax ? "❐" : "🗖"; }
 
 // eventos básicos
-el.btnNewTab.onclick = () => addTab("https://www.google.com");
+el.btnNewTab.onclick = () => addTab("https://www.startpage.com");
 
 async function goFromAddress() {
     const url = resolveInputToUrlOrSearch(el.address.value);
@@ -32,17 +32,17 @@ el.btnReload.onclick = () => state.currentView()?.reload();
 // atalhos
 document.addEventListener("keydown", (e) => {
     const k = e.key.toLowerCase();
-    if (e.ctrlKey && k === "t") { e.preventDefault(); addTab("https://www.google.com"); }
+    if (e.ctrlKey && k === "t") { e.preventDefault(); addTab("https://www.startpage.com"); }
     if (e.ctrlKey && k === "w") { e.preventDefault(); if (state.activeId != null) closeTab(state.activeId); }
     if ((e.ctrlKey || e.metaKey) && k === "l") { e.preventDefault(); el.address.focus(); el.address.select(); }
 });
 
 // bootstrap (start tab)
 window.wirepeek?.onConfig?.(({ targetUrl }) => {
-    addTab(targetUrl || "https://www.google.com");
+    addTab(targetUrl || "https://www.startpage.com");
     state.updateNavButtons();
 });
-if (!window.wirepeek) { addTab("https://www.google.com"); state.updateNavButtons(); }
+if (!window.wirepeek) { addTab("https://www.startpage.com"); state.updateNavButtons(); }
 
 // módulos opcionais
 initEngines();

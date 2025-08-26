@@ -45,7 +45,7 @@ button.icon:active{transform:translateY(1px)}
 .cap-off:hover{background:var(--btn-hover)}
 .cap-on{background:var(--accent);border:1px solid var(--accent);color:#fff}
 
-/* Botão do motor de busca */
+/* Botão do motor */
 #engine-btn{
     height:28px; padding:0 10px; border-radius:14px;
     border:1px solid var(--btn-border);
@@ -56,15 +56,27 @@ button.icon:active{transform:translateY(1px)}
 #engine-btn:hover{ background:var(--btn-hover) }
 #engine-btn:active{ transform:translateY(1px) }
 
-/* Menu do engine (context menu) */
+/* Dropdown do motor (ADAPTÁVEL) */
 .engine-menu{
-    position:fixed; z-index:9999; min-width:180px;
-    background:#1e1f22; border:1px solid #363636; border-radius:10px;
-    box-shadow:0 10px 24px #0008; padding:6px;
+    position:fixed; z-index:9999; min-width:220px; max-height:60vh; overflow:auto;
+    background:var(--btn-bg); color:var(--btn-ink);
+    border:1px solid var(--btn-border); border-radius:12px;
+    box-shadow:0 12px 32px #0009; padding:6px;
 }
+
+/* Itens em lista, com ícone */
 .engine-item{
-    padding:8px 10px; border-radius:8px; color:var(--chrome-ink);
-    cursor:pointer;
+    width:100%; display:flex; align-items:center; gap:10px;
+    padding:8px 10px; border-radius:10px; cursor:pointer;
+    background:transparent; border:none; color:inherit; font:inherit; text-align:left;
 }
-.engine-item:hover{ background:#2a2e33 }
-.engine-item.active::before{ content:"✓ "; color:#7cdd8b }
+.engine-item:hover, .engine-item:focus{ background:var(--btn-hover); outline:none }
+.engine-item[aria-checked="true"]{ background:color-mix(in srgb, var(--btn-hover) 75%, transparent) }
+
+.engine-item .ico{
+    width:18px; height:18px; display:inline-grid; place-items:center;
+    border-radius:4px; overflow:hidden; flex:0 0 18px;
+}
+.engine-item .lbl{ flex:1 1 auto }
+.engine-item .tick{ opacity:.9 }
+.engine-item[aria-checked="false"] .tick{ opacity:0 }
