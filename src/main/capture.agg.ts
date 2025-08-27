@@ -45,7 +45,22 @@ export function computeRouteKey(path: string): string {
  */
 export function onReq(req: CapReq): CapTxn {
   const url = new URL(req.url);
-  const routeKey = `${url.host}${computeRouteKey(url.pathname)}`;
+  let routeKey = `${url.host}${computeRouteKey(url.pathname)}`;
+
+  // Se for GraphQL, tenta extrair operationName do body (quando texto)
+  try {
+    const mime = req.headers?.['content-type'] || '';
+    if (/graphql|json/i.test(mime) && req.bodyBytes) {
+      const txt = new TextDecoder().decode(req.bodyBytes);
+      // aceita {"operationName": "..."} ou {"extensions":{"persistedQuery":{...}}}
+      const mOp = txt.match(/"operationName"\s*:\s*"([^"]+)"/);
+      if (mOp?.[1]) routeKey += `#${mOp[1]}`;
+      else {
+        const mHash = txt.match(/"sha256Hash"\s*:\s*"([0-9a-f]{16,})"/i);
+        if (mHash?.[1]) routeKey += `#persisted:${mHash[1].slice(0,8)}`;
+      }
+    }
+  } catch { /* noop */ }
 
   const txn: CapTxn = {
     id: req.id,
@@ -54,7 +69,7 @@ export function onReq(req: CapReq): CapTxn {
     path: url.pathname,
     routeKey,
     queryStr: url.search.slice(1),
-    req,
+    req
   };
   txIndex.set(req.id, txn);
   ordered.push(txn);

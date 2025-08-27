@@ -11,6 +11,7 @@ export interface AppConfig {
   userAgent: string | null;
   winWidth: number;
   winHeight: number;
+  redactSecrets: boolean;
 }
 
 export const config: AppConfig = {
@@ -18,5 +19,6 @@ export const config: AppConfig = {
   outputFolder: process.env.OUTPUT_FOLDER || "out",
   userAgent: (process.env.USER_AGENT || "").trim() || null,
   winWidth: parseInt(process.env.WIN_WIDTH || "1366", 10),
-  winHeight: parseInt(process.env.WIN_HEIGHT || "768", 10)
+  winHeight: parseInt(process.env.WIN_HEIGHT || "768", 10),
+  redactSecrets: (process.env.REDACT_SECRETS ?? "1") !== "0"
 };

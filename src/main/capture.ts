@@ -1,8 +1,8 @@
 ﻿/**
  * @file src/main/capture.ts
- * Captura HTTP(S) via session.webRequest, agrega req+resp e emite:
- *  - "cap:rest:request" | "cap:rest:before-send-headers" | "cap:rest:response" | "cap:rest:error"
- *  - "cap:txn" (transação consolidada para o Inspetor)
+ * @brief Captura HTTP(S) via session.webRequest, agrega req+resp e emite:
+ *   - "cap:rest:request" | "cap:rest:before-send-headers" | "cap:rest:response" | "cap:rest:error"
+ *   - "cap:txn" (transação consolidada para o Inspetor)
  */
 
 import {
@@ -17,7 +17,7 @@ import {
 import * as zlib from "zlib";
 import dns from "dns";
 import { URL } from "url";
-
+import { config } from "./config";
 import { onReq, onResp } from "./capture.agg";
 import type {
   CapReq,
@@ -27,8 +27,11 @@ import type {
   CapTxn,
 } from "../common/capture.types";
 
-/* ========================= Eventos granulares ========================= */
+/* ============================================================================
+ *                              Tipos de evento
+ * ========================================================================== */
 
+/** Evento granular emitido ao iniciar uma request (fetch/xhr/webRequest). */
 export type RestRequestPayload = {
   ts: number;
   url: string;
@@ -37,6 +40,7 @@ export type RestRequestPayload = {
   reqBody?: string;
 };
 
+/** Evento granular emitido ao finalizar a response (headers + métricas). */
 export type RestResponsePayload = {
   ts: number;
   url: string;
@@ -48,6 +52,7 @@ export type RestResponsePayload = {
   timingMs: number;
 };
 
+/** Canais suportados de emissão para UIs (renderer/inspector). */
 export type CapChannel =
   | "cap:rest:request"
   | "cap:rest:before-send-headers"
@@ -55,30 +60,50 @@ export type CapChannel =
   | "cap:rest:error"
   | "cap:txn";
 
+/** Callback para encaminhar eventos ao chamador. */
 type OnEventFn = (
   channel: CapChannel,
   payload: RestRequestPayload | RestResponsePayload | CapTxn
 ) => void;
 
-/* =============================== Utils =============================== */
+/* ============================================================================
+ *                                   Utils
+ * ========================================================================== */
 
+/**
+ * @brief Gera um snippet UTF-8 do corpo para visualização rápida.
+ * @param b  Buffer do corpo.
+ * @param max Tamanho máximo do texto.
+ * @returns Trecho de texto ou undefined.
+ */
 function bufToSnippet(b?: Uint8Array, max = 512): string | undefined {
   if (!b) return;
   const t = Buffer.from(b).toString("utf8");
   return t.length > max ? `${t.slice(0, max)} …` : t;
 }
 
+/**
+ * @brief Decodifica corpo de acordo com Content-Encoding (gzip/deflate/br).
+ * @param buf  Conteúdo bruto.
+ * @param headers Headers de resposta normalizados.
+ * @returns Buffer decodificado (ou o original se não suportado).
+ */
 function decodeBody(buf: Uint8Array, headers: Record<string, string>): Uint8Array {
   const enc = (headers["content-encoding"] || headers["Content-Encoding"] || "").toLowerCase();
   try {
     const nodeBuf = Buffer.from(buf);
-    if (enc.includes("gzip"))   return new Uint8Array(zlib.gunzipSync(nodeBuf));
-    if (enc.includes("deflate"))return new Uint8Array(zlib.inflateSync(nodeBuf));
-    if (enc.includes("br"))     return new Uint8Array(zlib.brotliDecompressSync(nodeBuf));
+    if (enc.includes("gzip")) return new Uint8Array(zlib.gunzipSync(nodeBuf));
+    if (enc.includes("deflate")) return new Uint8Array(zlib.inflateSync(nodeBuf));
+    if (enc.includes("br")) return new Uint8Array(zlib.brotliDecompressSync(nodeBuf));
   } catch { /* noop */ }
   return buf;
 }
 
+/**
+ * @brief Filtra/normaliza um conjunto de headers para chaves e valores simples.
+ * @param headers Headers heterogêneos (string | string[]).
+ * @returns Mapa com subset seguro de headers.
+ */
 function toSafeHeaderMap(
   headers: Record<string, string | string[]> | undefined
 ): Record<string, string> {
@@ -94,6 +119,7 @@ function toSafeHeaderMap(
     "host",
     "cache-control",
     "pragma",
+    (config.redactSecrets ? [] : ["authorization","cookie"])
   ]);
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(headers)) {
@@ -104,8 +130,14 @@ function toSafeHeaderMap(
   return out;
 }
 
-/** DNS com cache (opcional). */
+/** Cache simples para resolução DNS opcional (diagnóstico). */
 const dnsCache = new Map<string, string>();
+
+/**
+ * @brief Resolve e cacheia IP remoto a partir de uma URL.
+ * @param requestUrl URL do pedido.
+ * @returns IP ou "N/D".
+ */
 async function resolveRemoteIp(requestUrl: string): Promise<string> {
   try {
     const host = new URL(requestUrl).hostname;
@@ -120,29 +152,47 @@ async function resolveRemoteIp(requestUrl: string): Promise<string> {
   } catch { return "N/D"; }
 }
 
-/** Normaliza método para HttpMethod. */
+/**
+ * @brief Normaliza método HTTP para o union `HttpMethod`.
+ * @param m Método informado.
+ * @returns Método válido (fallback GET).
+ */
 function toHttpMethod(m: string): HttpMethod {
   const u = m.toUpperCase();
-  if (["GET","POST","PUT","PATCH","DELETE","HEAD","OPTIONS"].includes(u)) return u as HttpMethod;
+  if (["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].includes(u)) return u as HttpMethod;
   return "GET";
 }
 
-/** Converte entrada desconhecida em Uint8Array. */
-function toUint8Array(data: unknown): Uint8Array | undefined {
-  if (data == null) return undefined;
-
-  // guard para Buffer.isBuffer sem usar any
+/**
+ * @brief Converte valores `ArrayBuffer | Buffer` em `Uint8Array` (sem `any`).
+ * @param data Buffer nativo ou ArrayBuffer.
+ */
+function bytesToU8(data: ArrayBuffer | Buffer): Uint8Array {
   type BufferCtor = typeof Buffer & { isBuffer?(x: unknown): x is Buffer };
   const Buf = Buffer as BufferCtor;
+  return (typeof Buf?.isBuffer === "function" && Buf.isBuffer(data))
+    ? new Uint8Array(data)
+    : new Uint8Array(data as ArrayBuffer);
+}
 
-  if (typeof Buf?.isBuffer === "function" && Buf.isBuffer(data)) {
-    return new Uint8Array(data);
-  }
+
+/**
+ * @brief Converte entradas genéricas em `Uint8Array` quando possível.
+ * @param data Valor desconhecido.
+function toUint8Array(data: unknown): Uint8Array | undefined {
+  if (data == null) return undefined;
+  type BufferCtor = typeof Buffer & { isBuffer?(x: unknown): x is Buffer };
+  const Buf = Buffer as BufferCtor;
+  if (typeof Buf?.isBuffer === "function" && Buf.isBuffer(data)) return new Uint8Array(data);
   if (data instanceof Uint8Array) return data;
   if (data instanceof ArrayBuffer) return new Uint8Array(data);
   return undefined;
 }
-/* ===================== Estado interno por requestId ==================== */
+*/
+
+/* ============================================================================
+ *                     Estado interno (indexado por requestId)
+ * ========================================================================== */
 
 type ReqCtx = {
   startedAt: number;
@@ -162,10 +212,14 @@ type RespAccum = {
 };
 const respAcc = new Map<number, RespAccum>();
 
-/** Tipagem mínima do filtro de resposta do Electron. */
+/* ============================================================================
+ *                      Tipagem do filtro de resposta
+ * ========================================================================== */
+
+/** Mínimo necessário para stream de resposta (Electron). */
 interface ResponseFilter {
-  on(event: "data",  listener: (chunk: Buffer) => void): this;
-  on(event: "end",   listener: () => void): this;
+  on(event: "data", listener: (chunk: Buffer) => void): this;
+  on(event: "end", listener: () => void): this;
   on(event: "error", listener: (err: unknown) => void): this;
   write(chunk: Buffer): void;
   end(): void;
@@ -173,16 +227,63 @@ interface ResponseFilter {
 type WebRequestWithFilter = {
   filterResponseData: (id: number) => ResponseFilter;
 };
+/**
+ * @brief Obtém (com bind) `filterResponseData` se existir, evitando "not a function".
+ */
 function getFilterFn(obj: unknown): ((id: number) => ResponseFilter) | undefined {
   const maybe = obj as Partial<WebRequestWithFilter> | undefined;
   const fn = maybe?.filterResponseData;
   return typeof fn === "function" ? fn.bind(maybe) : undefined;
 }
 
-/* ================================ Core ================================ */
+/* ============================================================================
+ *                                    Core
+ * ========================================================================== */
 
 /**
- * Registra hooks de captura na sessão da janela e retorna função de detach.
+ * @brief Junta todos os chunks de `uploadData` (quando presentes em memória).
+ *
+ * `uploadData` pode conter três formas (tipos do Electron):
+ *  - `{ bytes: Buffer }`                 → suportado (concatena)
+ *  - `{ file: string, ... }`             → ignorado (não lê disco)
+ *  - `{ blobUUID: string }`              → ignorado (Blob por UUID)
+ */
+type UploadItem = NonNullable<OnBeforeRequestListenerDetails["uploadData"]>[number];
+type UploadRawLike = { bytes: ArrayBuffer | Buffer };
+
+function uploadItemToBytes(u: UploadItem): Uint8Array | undefined {
+  // Narrow por presença de 'bytes' sem usar 'any'
+  if (Object.prototype.hasOwnProperty.call(u as object, "bytes")) {
+    const raw = (u as UploadRawLike).bytes;
+    if (raw) return bytesToU8(raw);
+  }
+  return undefined;
+}
+
+/**
+ * @brief Concatena os bytes de `uploadData` em um único buffer.
+ * @param list Lista de itens do upload (ou undefined).
+ */
+function mergeUploadData(list?: ReadonlyArray<UploadItem>): Uint8Array | undefined {
+  if (!list?.length) return undefined;
+  const parts: Uint8Array[] = [];
+  for (const u of list) {
+    const p = uploadItemToBytes(u);
+    if (p) parts.push(p);
+  }
+  if (!parts.length) return undefined;
+  const total = parts.reduce((s, p) => s + p.byteLength, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.byteLength; }
+  return out;
+}
+
+/**
+ * @brief Registra hooks de captura na sessão da janela e retorna função de detach.
+ * @param win     Janela principal (fonte da `session` a ser capturada).
+ * @param onEvent Callback para encaminhar eventos às UIs/persistência.
+ * @returns Função para remover todos os hooks e limpar estado.
  */
 export function attachNetworkCapture(win: BrowserWindow, onEvent?: OnEventFn): () => void {
   const ses = win.webContents.session;
@@ -191,17 +292,15 @@ export function attachNetworkCapture(win: BrowserWindow, onEvent?: OnEventFn): (
   const emit = (
     channel: CapChannel,
     payload: RestRequestPayload | RestResponsePayload | CapTxn
-  ): void => {
-    try { onEvent?.(channel, payload); } catch { /* noop */ }
-  };
+  ): void => { try { onEvent?.(channel, payload); } catch { /* noop */ } };
 
-  /* -------- onBeforeRequest -------- */
+  /* --------------------------- onBeforeRequest --------------------------- */
   const onBeforeRequest = (
     d: OnBeforeRequestListenerDetails,
     callback: (resp: { cancel?: boolean; redirectURL?: string }) => void
   ): void => {
     try {
-      const body = toUint8Array(d.uploadData?.[0]?.bytes);
+      const body = mergeUploadData(d.uploadData);
 
       const ctx: ReqCtx = {
         startedAt: Date.now(),
@@ -244,7 +343,7 @@ export function attachNetworkCapture(win: BrowserWindow, onEvent?: OnEventFn): (
     }
   };
 
-  /* -------- onBeforeSendHeaders -------- */
+  /* ------------------------ onBeforeSendHeaders ------------------------- */
   const onBeforeSendHeaders = (
     d: OnBeforeSendHeadersListenerDetails,
     callback: (resp: { cancel?: boolean; requestHeaders?: Record<string, string> }) => void
@@ -256,15 +355,13 @@ export function attachNetworkCapture(win: BrowserWindow, onEvent?: OnEventFn): (
 
       emit("cap:rest:before-send-headers", {
         ts: Date.now(), url: d.url, method: d.method, reqHeaders: safe,
-      } satisfies RestRequestPayload);
+      } as RestRequestPayload);
     } finally {
       callback({});
     }
   };
 
-  /* -------- onHeadersReceived --------
-   * Guarda headers e, se suportado, intercepta o corpo.
-   * ----------------------------------- */
+  /* -------------------------- onHeadersReceived ------------------------- */
   const onHeadersReceived = (
     d: OnHeadersReceivedListenerDetails,
     callback: (resp: { cancel?: boolean; responseHeaders?: Record<string, string | string[]> }) => void
@@ -278,7 +375,7 @@ export function attachNetworkCapture(win: BrowserWindow, onEvent?: OnEventFn): (
         bodySize: 0,
       });
 
-      // Feature-detect real + bind da função; evita "not a function".
+      // Feature-detect do suporte a filterResponseData (nem todas versões expõem)
       const filterFn = getFilterFn(ses.webRequest);
       if (filterFn) {
         const stream = filterFn(d.id);
@@ -292,16 +389,15 @@ export function attachNetworkCapture(win: BrowserWindow, onEvent?: OnEventFn): (
           }
           stream.write(chunk); // pass-through
         });
-        stream.on("end",   () => { try { stream.end(); } catch { /* noop */ } });
+        stream.on("end", () => { try { stream.end(); } catch { /* noop */ } });
         stream.on("error", () => { try { stream.end(); } catch { /* noop */ } });
       }
-      // Sem suporte: seguimos apenas com headers/timing.
     } finally {
       callback({});
     }
   };
 
-  /* -------- onCompleted -------- */
+  /* ------------------------------ onCompleted --------------------------- */
   const onCompleted = (d: OnCompletedListenerDetails): void => {
     void (async () => {
       const now = Date.now();
@@ -320,7 +416,7 @@ export function attachNetworkCapture(win: BrowserWindow, onEvent?: OnEventFn): (
         resHeaders,
         bodySize: acc?.bodySize ?? 0,
         timingMs,
-      } satisfies RestResponsePayload);
+      } as RestResponsePayload);
 
       let bodyBuf: Uint8Array | undefined;
       if (acc && acc.bodyChunks.length) {
@@ -348,7 +444,7 @@ export function attachNetworkCapture(win: BrowserWindow, onEvent?: OnEventFn): (
       const ct = resHeaders["content-type"]; if (ct) capResp.contentType = ct;
       if (acc?.bodySize !== undefined) capResp.sizeBytes = acc.bodySize;
 
-      // fromCache pode não existir nos tipos
+      // Algumas versões expõem 'fromCache' no objeto (não tipado)
       const withCache = d as OnCompletedListenerDetails & Partial<{ fromCache: boolean }>;
       if (withCache.fromCache !== undefined) capResp.fromCache = withCache.fromCache;
 
@@ -361,17 +457,17 @@ export function attachNetworkCapture(win: BrowserWindow, onEvent?: OnEventFn): (
     })();
   };
 
-  /* -------- onErrorOccurred -------- */
+  /* ---------------------------- onErrorOccurred ------------------------- */
   const onErrorOccurred = (d: OnErrorOccurredListenerDetails): void => {
     void (async () => {
       await resolveRemoteIp(d.url);
       emit("cap:rest:error", {
         ts: Date.now(), url: d.url, method: d.method, reqHeaders: {},
-      } satisfies RestRequestPayload);
+      } as RestRequestPayload);
     })();
   };
 
-  /* -------- Registrar / Detach -------- */
+  /* ------------------------- Registrar / Detach ------------------------- */
   ses.webRequest.onBeforeRequest(filter, onBeforeRequest);
   ses.webRequest.onBeforeSendHeaders(filter, onBeforeSendHeaders);
   ses.webRequest.onHeadersReceived(filter, onHeadersReceived);
@@ -387,6 +483,10 @@ export function attachNetworkCapture(win: BrowserWindow, onEvent?: OnEventFn): (
     onErrorOccurred: RemoveAll;
   };
 
+  /**
+   * @brief Cancela a captura e limpa todos os estados.
+   * @returns void
+   */
   return (): void => {
     remover.onBeforeRequest(null);
     remover.onBeforeSendHeaders(null);

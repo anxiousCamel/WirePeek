@@ -10,6 +10,8 @@ const isDev =
     process.env.ELECTRON_ENV === "development" ||
     !app.isPackaged;
 
+app.commandLine.appendSwitch('disable-quic'); // força sair de HTTP/3 | Em alguns cenários o filterResponseData se comporta melhor sem QUIC.
+
 app.whenReady().then(() => {
     const ctx: AppContext = {
         isDev,

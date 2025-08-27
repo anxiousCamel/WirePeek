@@ -220,7 +220,7 @@ export class CaptureSession {
           }
         : {}),
     };
-
+    const wantBody = d.resHeaders["content-type"]?.includes("application/json") && d.bodySize <= 64 * 1024;
     const response: HarResponse = {
       status: d.status,
       statusText: d.statusText,
@@ -231,7 +231,7 @@ export class CaptureSession {
       content: {
         size: d.bodySize,
         mimeType: d.resHeaders["content-type"] ?? "",
-        text: "", // não gravamos corpo para evitar volume; pode ser preenchido depois
+        text: wantBody ? (req?.reqBody ? "" : "") : "", // não gravamos corpo para evitar volume; pode ser preenchido depois
       },
     };
 

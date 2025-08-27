@@ -1,53 +1,66 @@
 /* eslint-env browser */
 /**
- * Preload do <webview> (convidado)
- * --------------------------------
- * - Roda dentro do processo do webview, antes do site.
- * - Instrumenta fetch / XHR / WebSocket para emitir eventos de captura.
- * - Envia os eventos para o host (renderer pai) via ipcRenderer.sendToHost.
- * - Usa wrappers com try/catch para NUNCA quebrar o convidado se algo falhar.
+ * @file src/webview/preload.capture.ts
+ * @brief Preload que roda dentro do processo do <webview> (convidado).
  *
- * Eventos emitidos (todos via sendToHost):
- *  - "cap:rest:request"  { ts, url, method, reqHeaders, reqBody? }
- *  - "cap:rest:response" { ts, url, method, status, statusText, resHeaders, bodySize, timingMs }
- *  - "cap:rest:error"    { ts, url, method, reqHeaders }
- *  - "cap:ws:open"       { ts, id, url, protocols? }
- *  - "cap:ws:msg"        { ts, id, dir: "in"|"out", data }
- *  - "cap:ws:close"      { ts, id, code, reason }
- *  - "cap:ws:error"      { ts, id }
+ * Responsabilidades:
+ *  - Instrumentar fetch / XHR / WebSocket (e opcionalmente SSE/Beacon).
+ *  - Emitir eventos de captura para o host via `ipcRenderer.sendToHost(...)`.
+ *  - Ser resiliente: nunca quebrar a página convidada (try/catch em volta).
+ *
+ * Canais emitidos:
+ *   - "cap:rest:request"  { ts, url, method, reqHeaders, reqBody? }
+ *   - "cap:rest:response" { ts, url, method, status, statusText, resHeaders, bodySize, timingMs }
+ *   - "cap:rest:error"    { ts, url, method, reqHeaders }
+ *   - "cap:ws:open"       { ts, id, url, protocols? }
+ *   - "cap:ws:msg"        { ts, id, dir: "in"|"out", data }
+ *   - "cap:ws:close"      { ts, id, code, reason }
+ *   - "cap:ws:error"      { ts, id }
+ *   - "cap:sse:open"      { ts, url, withCredentials }
+ *   - "cap:sse:msg"       { ts, url, data }
+ *   - "cap:sse:error"     { ts, url }
+ *   - "cap:beacon"        { ts, url, size }
  */
 
 import { ipcRenderer, contextBridge } from "electron";
 
 /* ============================================================================
- * Utilidades
+ * Utilidades / helpers
  * ========================================================================== */
 
-/** Envia para o host sem jamais lançar exceção (evita crash do guest). */
+/**
+ * @brief Envia um payload ao host sem deixar exceções vazarem (robustez).
+ * @param channel Canal enviado ao host (renderer-pai).
+ * @param payload Qualquer payload serializável.
+ */
 function safeSend(channel: string, payload: unknown): void {
     try {
         ipcRenderer.sendToHost(channel, payload);
-    } catch (err) {
-        // Isso aparece no host se você ouvir "console-message" no <webview>.
-        // Útil para debug caso o pipe esteja indisponível.
-        // console.debug("[cap] safeSend failed:", channel, err);
+    } catch (_err) {
+        // Mantemos silêncio por padrão para não poluir console do convidado.
+        // Satisfaz "no-empty":
+        void 0;
     }
 }
 
-type HeaderInitLike = Headers | Record<string, string> | string[][];
+/** Conveniência local para o tipo do DOM. */
+type HeaderInitLike = HeadersInit;
 
-/** Normaliza Headers/HeadersInit/Record em { k: v } (lowercase). */
+/**
+ * @brief Normaliza Headers/HeadersInit/Record em { k: v } (lowercase).
+ * @param h Estrutura de headers suportada pelo DOM.
+ */
 function headersToObj(h?: HeaderInitLike): Record<string, string> {
     if (!h) return {};
-    // Caso seja Headers
-    if (typeof (h as Headers).forEach === "function") {
+    // Headers
+    if (h instanceof Headers) {
         const o: Record<string, string> = {};
-        (h as Headers).forEach((v, k) => {
+        h.forEach((v, k) => {
             o[String(k).toLowerCase()] = String(v);
         });
         return o;
     }
-    // Caso seja string[][]
+    // string[][]
     if (Array.isArray(h)) {
         const o: Record<string, string> = {};
         for (const [k, v] of h) {
@@ -55,12 +68,21 @@ function headersToObj(h?: HeaderInitLike): Record<string, string> {
         }
         return o;
     }
-    // Caso seja Record<string,string>
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v);
-    return out;
+    // Record<string,string>
+    if (typeof h === "object") {
+        const out: Record<string, string> = {};
+        for (const [k, v] of Object.entries(h as Record<string, string>)) {
+            out[k.toLowerCase()] = String(v);
+        }
+        return out;
+    }
+    return {};
 }
 
+/**
+ * @brief Converte ArrayBuffer (ou view) em base64 para transporte legível.
+ * @param ab Buffer ou view compatível.
+ */
 /** Converte ArrayBuffer (ou view) em base64 para transporte legível. */
 function abToBase64(ab: ArrayBufferLike): string {
     const bytes = new Uint8Array(ab);
@@ -73,50 +95,46 @@ function abToBase64(ab: ArrayBufferLike): string {
     return btoa(bin);
 }
 
-
 /* ============================================================================
  * fetch() - proxy com telemetria
  * ========================================================================== */
 
 const __origFetch = window.fetch.bind(window);
 
+/**
+ * @brief Wrapper de `window.fetch` que emite eventos de request/response.
+ */
 window.fetch = async function fetchCaptured(
     input: RequestInfo | URL,
     init?: RequestInit
 ): Promise<Response> {
-    // --------- URL e método ---------
-    const reqUrl =
-        typeof input === "string"
-            ? input
-            : input instanceof URL
-                ? input.toString()
-                : (input as Request).url;
+    // -------- URL & método ----------
+    let reqUrl: string;
+    let method: string;
 
-    const method = (
-        init?.method ||
-        (typeof input !== "string" && !(input instanceof URL)
-            ? (input as Request).method
-            : "GET")
-    ).toUpperCase();
+    if (typeof input === "string" || input instanceof URL) {
+        reqUrl = typeof input === "string" ? input : input.toString();
+        method = (init?.method ?? "GET").toUpperCase();
+    } else {
+        // input é um Request
+        const r = input as Request;
+        reqUrl = r.url;
+        method = (init?.method ?? r.method ?? "GET").toUpperCase();
+    }
 
-    // --------- cabeçalhos da requisição ---------
+    // -------- cabeçalhos da requisição ----------
     let reqHeaders: Record<string, string> = {};
     try {
         if (init?.headers) {
-            const ih = init.headers as unknown;
-            let hInit: HeadersInit = [];
-            if (ih instanceof Headers || Array.isArray(ih) || typeof ih === "object") {
-                hInit = ih as HeadersInit;
-            }
-            reqHeaders = headersToObj(new Headers(hInit));
-        } else if (typeof input !== "string" && !(input instanceof URL)) {
-            reqHeaders = headersToObj((input as Request).headers);
+            reqHeaders = headersToObj(init.headers);
+        } else if (input instanceof Request) {
+            reqHeaders = headersToObj(input.headers);
         }
-    } catch {
-        /* noop */
+    } catch (_e) {
+        void 0;
     }
 
-    // --------- corpo da requisição (texto simples / URLSearchParams) ---------
+    // -------- corpo (texto simples / querystring) ----------
     let reqBody: string | undefined;
     try {
         const b = init?.body as unknown;
@@ -125,10 +143,9 @@ window.fetch = async function fetchCaptured(
         } else if (b instanceof URLSearchParams) {
             reqBody = b.toString();
         }
-        // Observação: ler Blob/streams aqui consumiria o body do fetch
-        // e pode quebrar a requisição; se precisar, avalie carefully.
-    } catch {
-        /* noop */
+        // Observação: ler Blob/streams aqui consome o body → risco de quebrar a request.
+    } catch (_e) {
+        void 0;
     }
 
     const tStart = Date.now();
@@ -141,17 +158,17 @@ window.fetch = async function fetchCaptured(
         reqBody,
     });
 
-    // --------- executa a requisição real ---------
+    // -------- executa a requisição real ----------
     try {
         const resp = await __origFetch(input as RequestInfo, init);
 
-        // Tamanho do corpo (sem materializar string): arrayBuffer é mais barato p/ medir
+        // Tamanho sem materializar string: `arrayBuffer()` é mais barato para medir
         let bodySize = 0;
         try {
             const buf = await resp.clone().arrayBuffer();
             bodySize = buf.byteLength;
-        } catch {
-            /* noop */
+        } catch (_e) {
+            void 0;
         }
 
         safeSend("cap:rest:response", {
@@ -181,6 +198,7 @@ window.fetch = async function fetchCaptured(
  * XMLHttpRequest - proxy com telemetria
  * ========================================================================== */
 
+/** Estado interno guardado por instância de XHR. */
 interface XhrWithCap extends XMLHttpRequest {
     __cap?: {
         method: string;
@@ -192,10 +210,28 @@ interface XhrWithCap extends XMLHttpRequest {
 
 (function patchXHR() {
     const proto = XMLHttpRequest.prototype;
-    const _open = proto.open;
-    const _send = proto.send;
-    const _setHeader = proto.setRequestHeader;
 
+    // Tipagens explícitas dos métodos originais (evita casts depois)
+    const _open: (
+        this: XMLHttpRequest,
+        method: string,
+        url: string,
+        async?: boolean,
+        username?: string | null,
+        password?: string | null
+    ) => void = proto.open;
+
+    const _send: (
+        this: XMLHttpRequest,
+        body?: Document | XMLHttpRequestBodyInit | null
+    ) => void = proto.send;
+
+    const _setHeader: (this: XMLHttpRequest, k: string, v: string) => void =
+        proto.setRequestHeader;
+
+    /**
+     * @brief Intercepta `open` para armazenar método/URL.
+     */
     proto.open = function (
         this: XhrWithCap,
         method: string,
@@ -204,24 +240,32 @@ interface XhrWithCap extends XMLHttpRequest {
         username?: string | null,
         password?: string | null
     ): void {
-        this.__cap = { method: String(method || "GET").toUpperCase(), url, headers: {}, tStart: 0 };
+        this.__cap = {
+            method: String(method || "GET").toUpperCase(),
+            url,
+            headers: {},
+            tStart: 0,
+        };
         return _open.call(this, method, url, async ?? true, username ?? null, password ?? null);
     };
 
+    /**
+     * @brief Intercepta `setRequestHeader` para coletar headers.
+     */
     proto.setRequestHeader = function (this: XhrWithCap, k: string, v: string): void {
         try {
             if (!this.__cap) this.__cap = { method: "GET", url: "", headers: {}, tStart: 0 };
             this.__cap.headers[k.toLowerCase()] = v;
-        } catch {
-            /* noop */
+        } catch (_e) {
+            void 0;
         }
         return _setHeader.call(this, k, v);
     };
 
-    proto.send = function (
-        this: XhrWithCap,
-        body?: Document | XMLHttpRequestBodyInit | null
-    ): void {
+    /**
+     * @brief Intercepta `send` para emitir request/response e tempos.
+     */
+    proto.send = function (this: XhrWithCap, body?: Document | XMLHttpRequestBodyInit | null): void {
         try {
             if (!this.__cap) this.__cap = { method: "GET", url: "", headers: {}, tStart: 0 };
             this.__cap.tStart = Date.now();
@@ -238,7 +282,7 @@ interface XhrWithCap extends XMLHttpRequest {
                 if (this.readyState === 4) {
                     const tEnd = Date.now();
 
-                    // Parse básico dos headers de resposta
+                    // Parse básico de headers de resposta
                     const resHeaders: Record<string, string> = {};
                     try {
                         const raw = this.getAllResponseHeaders() || "";
@@ -253,14 +297,12 @@ interface XhrWithCap extends XMLHttpRequest {
                                     resHeaders[k] = v;
                                 }
                             });
-                    } catch {
-                        /* noop */
+                    } catch (_e) {
+                        void 0;
                     }
 
-                    // Tamanho aproximado quando responseType = "" (texto)
-                    // Para binários, você pode tratar responseType === "arraybuffer"/"blob" se quiser.
-                    const size =
-                        typeof this.responseText === "string" ? this.responseText.length : 0;
+                    // Aproxima tamanho quando responseType padrão (texto)
+                    const size = typeof this.responseText === "string" ? this.responseText.length : 0;
 
                     safeSend("cap:rest:response", {
                         ts: tEnd,
@@ -283,16 +325,12 @@ interface XhrWithCap extends XMLHttpRequest {
                     reqHeaders: this.__cap?.headers || {},
                 });
             });
-        } catch {
-            /* noop */
+        } catch (_e) {
+            void 0;
         }
 
-        //tipagem explícita, sem "any"
-        return _send.call(
-            this,
-            (body ?? null) as Document | XMLHttpRequestBodyInit | null
-        );
-
+        // Sem 'any' e preservando o this correto
+        return _send.call(this, body ?? null);
     };
 })();
 
@@ -302,6 +340,11 @@ interface XhrWithCap extends XMLHttpRequest {
 
 (function patchWS() {
     const OrigWS = window.WebSocket;
+
+    /** @brief Type guard para `ArrayBufferView` sem usar assertions. */
+    function isArrayBufferView(x: unknown): x is ArrayBufferView {
+        return x != null && typeof x === "object" && ArrayBuffer.isView(x as ArrayBufferView);
+    }
 
     class CapturedWebSocket extends OrigWS {
         constructor(url: string | URL, protocols?: string | string[]) {
@@ -324,27 +367,22 @@ interface XhrWithCap extends XMLHttpRequest {
                     let repr: string;
                     if (data instanceof ArrayBuffer) {
                         repr = `base64:${abToBase64(data)}`;
-                    } else if (ArrayBuffer.isView(data)) {
-                        repr = `base64:${abToBase64((data as ArrayBufferView).buffer)}`;
+                    } else if (isArrayBufferView(data)) {
+                        repr = `base64:${abToBase64(data.buffer)}`;
                     } else {
                         repr = String(data);
                     }
                     safeSend("cap:ws:msg", { ts: Date.now(), id, dir: "in", data: repr });
-                } catch {
-                    /* noop */
+                } catch (_e) {
+                    void 0;
                 }
             });
 
             // Mensagens enviadas
-            const origSend = this.send as (
+            const origSend: (
                 this: WebSocket,
                 data: string | ArrayBufferLike | Blob | ArrayBufferView
-            ) => void;
-
-            // type guard pra evitar "as" espalhado
-            function isArrayBufferView(x: unknown): x is ArrayBufferView {
-                return x != null && typeof x === "object" && ArrayBuffer.isView(x as ArrayBufferView);
-            }
+            ) => void = this.send;
 
             this.send = function (
                 this: WebSocket,
@@ -352,25 +390,27 @@ interface XhrWithCap extends XMLHttpRequest {
             ): void {
                 try {
                     let repr: string;
-
-                    // Se for binário, converte para base64
                     if (data instanceof ArrayBuffer || isArrayBufferView(data)) {
-                        const buf: ArrayBufferLike =
-                            data instanceof ArrayBuffer ? data : data.buffer;
+                        const buf: ArrayBufferLike = data instanceof ArrayBuffer ? data : data.buffer;
                         repr = `base64:${abToBase64(buf)}`;
                     } else {
-                        // Texto (inclui strings e Blobs tratados pelo próprio WS)
                         repr = String(data);
                     }
-
                     safeSend("cap:ws:msg", { ts: Date.now(), id, dir: "out", data: repr });
-                } catch {
-                    /* noop */
+                } catch (_e) {
+                    void 0;
                 }
-
-                // chama o send original preservando o this correto e sem 'any'
+                // preserva this correto; sem 'any'
                 Reflect.apply(origSend, this, [data]);
             };
+
+            this.addEventListener("close", (ev: CloseEvent) => {
+                safeSend("cap:ws:close", { ts: Date.now(), id, code: ev.code, reason: ev.reason });
+            });
+
+            this.addEventListener("error", () => {
+                safeSend("cap:ws:error", { ts: Date.now(), id });
+            });
         }
     }
 
@@ -380,6 +420,64 @@ interface XhrWithCap extends XMLHttpRequest {
         writable: true,
         value: CapturedWebSocket,
     });
+})();
+
+/* ============================================================================
+ * EventSource (SSE) – log leve de abertura/mensagens/erros
+ * ========================================================================== */
+
+(function patchEventSource() {
+    const _ES = window.EventSource;
+    if (!_ES) return;
+
+    class ES extends _ES {
+        constructor(url: string | URL, init?: EventSourceInit) {
+            const u = String(url);
+            super(u, init);
+            safeSend("cap:sse:open", {
+                ts: Date.now(),
+                url: u,
+                withCredentials: !!init?.withCredentials,
+            });
+            this.addEventListener("message", (ev) => {
+                safeSend("cap:sse:msg", { ts: Date.now(), url: u, data: String(ev.data ?? "") });
+            });
+            this.addEventListener("error", () => {
+                safeSend("cap:sse:error", { ts: Date.now(), url: u });
+            });
+        }
+    }
+
+    Object.defineProperty(window, "EventSource", {
+        configurable: true,
+        writable: true,
+        value: ES,
+    });
+})();
+
+/* ============================================================================
+ * navigator.sendBeacon – URL + tamanho (sem bloquear thread)
+ * ========================================================================== */
+
+(function patchBeacon() {
+    const orig = navigator.sendBeacon?.bind(navigator);
+    if (!orig) return;
+
+    navigator.sendBeacon = function (url: string | URL, data?: BodyInit | null): boolean {
+        let size = 0;
+        try {
+            if (typeof data === "string") size = data.length;
+            else if (data instanceof Blob) size = data.size;
+            else if (data instanceof ArrayBuffer) size = data.byteLength;
+            else if (ArrayBuffer.isView(data as ArrayBufferView)) size = (data as ArrayBufferView).byteLength;
+            else if (data instanceof URLSearchParams) size = String(data).length;
+        } catch (_e) {
+            void 0;
+        }
+        safeSend("cap:beacon", { ts: Date.now(), url: String(url), size });
+        // mesma assinatura; sem 'any'
+        return orig(url, data ?? null);
+    };
 })();
 
 /* ============================================================================
