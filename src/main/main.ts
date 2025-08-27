@@ -1,4 +1,4 @@
-// src/main/app.ts
+// src/main/main.ts < n ta como app.ts
 import { app, BrowserWindow } from "electron";
 import { createUserSession } from "./session.profile";
 import { createMainWindow } from "./win.main";
@@ -10,22 +10,25 @@ const isDev =
     process.env.ELECTRON_ENV === "development" ||
     !app.isPackaged;
 
-const ctx: AppContext = {
-    isDev,
-    userSession: createUserSession(),
-    mainWin: null,
-    inspectorWin: null,
-    wvPreloadUrl: null,
-    setMainWin: (w) => (ctx.mainWin = w),
-    setInspectorWin: (w) => (ctx.inspectorWin = w),
-};
-
 app.whenReady().then(() => {
+    const ctx: AppContext = {
+        isDev,
+        userSession: createUserSession(),
+        mainWin: null,
+        inspectorWin: null,
+        wvPreloadUrl: null,
+        setMainWin: (w) => (ctx.mainWin = w),
+        setInspectorWin: (w) => (ctx.inspectorWin = w),
+    };
+
     createMainWindow(ctx);
     registerAllIpc(ctx);
 
-    app.on("activate", () => {
-        if (BrowserWindow.getAllWindows().length === 0) createMainWindow(ctx);
+    app.on("window-all-closed", () => {
+        if (process.platform !== "darwin") app.quit();
+        app.on("activate", () => {
+            if (BrowserWindow.getAllWindows().length === 0) createMainWindow(ctx);
+        });
     });
 });
 

@@ -4,6 +4,7 @@ import type { BrowserWindowConstructorOptions } from "electron";
 import { mainAssets, webviewPreloadUrl } from "./assets.js";
 import { config } from "./config.js";
 import type { AppContext } from "./context.js";
+import { WIREPEEK_PARTITION } from "./session.profile.js";
 
 export function createMainWindow(ctx: AppContext): BrowserWindow {
     const { html, preload } = mainAssets(ctx.isDev);
@@ -35,6 +36,7 @@ export function createMainWindow(ctx: AppContext): BrowserWindow {
             targetUrl: config.targetUrl,
             isDev: ctx.isDev,
             wvPreload: ctx.wvPreloadUrl,
+            wvPartition: WIREPEEK_PARTITION, // manda a partition para o renderer
         });
     });
 

@@ -17,6 +17,7 @@ export type UiConfig = {
   isDev?: boolean;
   /** caminho file:// para o preload do <webview> */
   wvPreload?: string;
+  wvPartition?: string;
 };
 
 export type CaptureState = { capturing: boolean };
@@ -71,6 +72,7 @@ declare global {
     win?: WinAPI;
     wirepeek?: WirepeekAPI;
     __wvPreloadPath: string | undefined;
+    __wvPartition?: string | undefined;
   }
 }
 
@@ -138,8 +140,8 @@ const wirepeekApi: WirepeekAPI = {
   onConfig: (cb) =>
     on<UiConfig>("ui:config", (_e, cfg) => {
       // salva/limpa o caminho do preload do <webview> no escopo global da UI
-      window.__wvPreloadPath =
-        typeof cfg?.wvPreload === "string" ? cfg.wvPreload : undefined;
+      window.__wvPreloadPath = typeof cfg?.wvPreload === "string" ? cfg.wvPreload : undefined;
+      window.__wvPartition = typeof cfg?.wvPartition === "string" ? cfg.wvPartition : undefined;
       cb(cfg);
     }),
 
