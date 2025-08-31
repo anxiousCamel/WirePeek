@@ -2,10 +2,17 @@
  * @file src/main/capture.agg.ts
  * @brief Agregador de transações (req + resp) para o Inspector.
  *        - Mantém um índice por id e uma lista ordenada (para render).
- *        - Gera uma routeKey normalizada (com host + pathname normalizado).
+ *        - Gera uma routeKey normalizada (host + pathname normalizado).
+ *        - Calcula métricas (duration, TTFB, Receive).
  */
 
-import { CapTxn, CapReq, CapResp } from "../common/capture.types";
+import type { CapTxn, CapReq, CapResp } from "../common/capture.types";
+
+/** Tipo local para JWT (evita depender do export do módulo de tipos) */
+type LocalCapJwtInfo = {
+  token: string;
+  decoded: { header?: unknown; payload?: unknown };
+};
 
 /** Cache em memória das transações desta sessão */
 const txIndex = new Map<string, CapTxn>();
@@ -18,8 +25,8 @@ export function resetAgg(): void {
 }
 
 /**
- * Normaliza o pathname para agrupar rotas semelhantes (com ids/uuids/datas),
- * mas **mantém o host** para não colapsar sites diferentes.
+ * Normaliza o pathname para agrupar rotas semelhantes (com ids/uuids/datas).
+ * Mantém o host para não colapsar sites diferentes.
  */
 export function computeRouteKey(path: string): string {
   // UUID v4
@@ -40,8 +47,8 @@ export function computeRouteKey(path: string): string {
 }
 
 /**
- * onReq: cria a transação parcial e indexa.
- * A **routeKey** agora inclui o host para diferenciar domínios.
+ * @brief onReq: cria a transação parcial e indexa.
+ * A routeKey inclui o host para diferenciar domínios.
  */
 export function onReq(req: CapReq): CapTxn {
   const url = new URL(req.url);
@@ -49,7 +56,7 @@ export function onReq(req: CapReq): CapTxn {
 
   // Se for GraphQL, tenta extrair operationName do body (quando texto)
   try {
-    const mime = req.headers?.['content-type'] || '';
+    const mime = req.headers?.["content-type"] || "";
     if (/graphql|json/i.test(mime) && req.bodyBytes) {
       const txt = new TextDecoder().decode(req.bodyBytes);
       // aceita {"operationName": "..."} ou {"extensions":{"persistedQuery":{...}}}
@@ -57,10 +64,12 @@ export function onReq(req: CapReq): CapTxn {
       if (mOp?.[1]) routeKey += `#${mOp[1]}`;
       else {
         const mHash = txt.match(/"sha256Hash"\s*:\s*"([0-9a-f]{16,})"/i);
-        if (mHash?.[1]) routeKey += `#persisted:${mHash[1].slice(0,8)}`;
+        if (mHash?.[1]) routeKey += `#persisted:${mHash[1].slice(0, 8)}`;
       }
     }
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
 
   const txn: CapTxn = {
     id: req.id,
@@ -69,24 +78,50 @@ export function onReq(req: CapReq): CapTxn {
     path: url.pathname,
     routeKey,
     queryStr: url.search.slice(1),
-    req
+    req,
   };
   txIndex.set(req.id, txn);
   ordered.push(txn);
   return txn;
 }
 
-/** onResp: completa a transação com a resposta e calcula durationMs */
+/**
+ * @brief Aplica (de forma tolerante) um patch de JWT ao CapReq depois que a transação foi criada.
+ * @param id  ID da transação (igual ao id da request)
+ * @param jwt Objeto de info de JWT (token redigido + decodificado)
+ *
+ * Observação: usamos type-cast para não depender do CapReq.jwt estar
+ * “visível” no ambiente do compilador (evita erro TS2339).
+ */
+export function patchReqJwt(id: string, jwt: LocalCapJwtInfo): void {
+  const txn = txIndex.get(id);
+  if (!txn) return;
+  (txn.req as CapReq & { jwt?: LocalCapJwtInfo }).jwt = jwt;
+}
+
+/**
+ * @brief onResp: completa a transação com a resposta e calcula métricas.
+ */
 export function onResp(resp: CapResp): CapTxn | undefined {
   const txn = txIndex.get(resp.id);
   if (!txn) return undefined;
 
   txn.resp = resp;
-  if (resp.timing.endTs && txn.req.timing.startTs) {
-    txn.durationMs = Math.max(
-      0,
-      resp.timing.endTs - txn.req.timing.startTs
-    );
+
+  const t0 = txn.req.timing.startTs;
+  const tEnd = resp.timing.endTs;
+  const tFB = resp.timing.firstByteTs;
+
+  if (tEnd) {
+    const total = Math.max(0, tEnd - t0);
+    txn.durationMs = total;
+
+    if (tFB) {
+      const tfb = Math.max(0, tFB - t0);
+      // Type-cast local caso o CapTxn ainda não “exponha” esses campos no ambiente
+      (txn as CapTxn & { ttfbMs?: number; receiveMs?: number }).ttfbMs = tfb;
+      (txn as CapTxn & { ttfbMs?: number; receiveMs?: number }).receiveMs = Math.max(0, total - tfb);
+    }
   }
   return txn;
 }
