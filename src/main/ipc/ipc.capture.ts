@@ -1,3 +1,4 @@
+// src/main/ipc/ipc.capture.ts
 /**
  * @file src/main/ipc/ipc.capture.ts
  * @brief IPC do fluxo de captura:
@@ -19,29 +20,94 @@ import {
 } from "../capture.js";
 import { CaptureSession } from "../capture.session.js";
 import { openInspector, hideInspector } from "../win.inspector.js";
-import type { CapTxn } from "../common/capture.types.ts";
+import { config } from "../config";
+import type { CapTxn } from "../common/capture.types";
 
 /* ----------------------------------------------------------------------------
  * Tipos dos envelopes/granulares que trafegam até o Inspector
  * -------------------------------------------------------------------------- */
 
+/**
+ * @typedef WsOpenPayload
+ * @property {number} ts
+ * @property {string} id
+ * @property {string} url
+ * @property {string|string[]} [protocols]
+ */
 type WsOpenPayload = { ts: number; id: string; url: string; protocols?: string | string[] };
+
+/**
+ * @typedef WsMsgPayload
+ * @property {number} ts
+ * @property {"in"|"out"} dir
+ * @property {string} id
+ * @property {string} data
+ */
 type WsMsgPayload = { ts: number; id: string; dir: "in" | "out"; data: string };
+
+/**
+ * @typedef WsClosePayload
+ * @property {number} ts
+ * @property {string} id
+ * @property {number} code
+ * @property {string} reason
+ */
 type WsClosePayload = { ts: number; id: string; code: number; reason: string };
+
+/** @typedef WsErrorPayload */
 type WsErrorPayload = { ts: number; id: string };
 
 /**
- * Frames WS via CDP (opcional). `direction` indica sentido do frame;
- * `url` é resolvido a partir de `Network.webSocketCreated`.
+ * @typedef WsFramePayload
+ * @brief Frames WS via CDP (opcional).
+ * @property {number} ts
+ * @property {"in"|"out"} direction
+ * @property {string} [url]
+ * @property {number} [opCode]
+ * @property {string} [data]
  */
 type WsFramePayload = {
     ts: number;
     direction: "in" | "out";
-    url?: string | undefined;
-    opCode?: number | undefined;
-    data?: string | undefined;
+    url?: string;
+    opCode?: number;
+    data?: string;
 };
 
+/**
+ * @typedef CdpInitiator
+ * @property {string} type    Ex.: "parser", "script", "preload", "other"
+ * @property {string} [url]   URL que causou o disparo (quando aplicável)
+ */
+type CdpInitiator = { type: string; url?: string };
+
+/**
+ * @typedef CdpRedirect
+ * @property {string} from  URL de origem (antes do redirect)
+ * @property {string} to    URL de destino (após o redirect)
+ * @property {number} status Código HTTP do redirect (ex.: 301, 302, 307...)
+ */
+type CdpRedirect = { from: string; to: string; status: number };
+
+/**
+ * @typedef CdpInitiatorPayload
+ * @brief Evento sintético para o Inspector com initiator + cadeia de redirects
+ * @property {string} requestId       ID do CDP (Network.requestWillBeSent.requestId)
+ * @property {string} url             URL atual da navegação/pedido
+ * @property {CdpRedirect[]} redirectChain  Cadeia acumulada de redirects
+ * @property {CdpInitiator} [initiator]     Initiator (quando fornecido pelo CDP)
+ */
+type CdpInitiatorPayload = {
+    requestId: string;
+    url: string;
+    redirectChain: CdpRedirect[];
+    initiator?: CdpInitiator;
+};
+
+/**
+ * @typedef CapEnvelope
+ * @brief Union dos eventos encaminhados ao Inspector.
+ */
 type CapEnvelope =
     | { channel: "cap:txn"; payload: CapTxn }
     | { channel: "cap:rest:request"; payload: RestRequestPayload }
@@ -53,37 +119,31 @@ type CapEnvelope =
     | { channel: "cap:ws:close"; payload: WsClosePayload }
     | { channel: "cap:ws:error"; payload: WsErrorPayload }
     | { channel: "cap:ws:frame"; payload: WsFramePayload }
+    | { channel: "cap:cdp:initiator"; payload: CdpInitiatorPayload };
+
 /* ----------------------------------------------------------------------------
  * Estado interno de captura
  * -------------------------------------------------------------------------- */
 
-let detachWebRequest: null | (() => void) = null;  // remove webRequest hooks
-let detachCdp: null | (() => void) = null;         // detach do DevTools Protocol
-let capSession: CaptureSession | null = null;      // sessão de gravação atual
+let detachWebRequest: null | (() => void) = null; // remove webRequest hooks
+let detachCdp: null | (() => void) = null;        // detach do DevTools Protocol
+let capSession: CaptureSession | null = null;     // sessão de gravação atual
 
-/**
- * @brief Diz se há captura ativa.
- */
+/** @returns {boolean} Se há captura ativa. */
 function isCapturing(): boolean {
     return !!detachWebRequest || !!detachCdp;
 }
 
-/**
- * @brief Notifica todas as UIs (renderers + inspector) sobre o estado de captura.
- */
+/** Notifica todas as UIs sobre o estado de captura. */
 function broadcastState(): void {
     const payload = { capturing: isCapturing() };
     for (const wc of webContents.getAllWebContents()) {
         // evita enviar para DevTools e outras visões internas
-        if (!wc.getURL().startsWith("devtools://")) {
-            wc.send("cap:state", payload);
-        }
+        if (!wc.getURL().startsWith("devtools://")) wc.send("cap:state", payload);
     }
 }
 
-/**
- * @brief Envia envelopes para o Inspector (se existir).
- */
+/** Envia envelopes para o Inspector (se existir). */
 function inspectorBroadcast(ctx: AppContext, env: CapEnvelope): void {
     const w = ctx.inspectorWin;
     if (!w || w.isDestroyed()) return;
@@ -91,9 +151,8 @@ function inspectorBroadcast(ctx: AppContext, env: CapEnvelope): void {
 }
 
 /* ----------------------------------------------------------------------------
- * Helpers (type guards) para extrair campos do CDP sem usar `any`
+ * Helpers (type guards) para extrair campos do CDP sem `any`
  * -------------------------------------------------------------------------- */
-
 function isRecord(x: unknown): x is Record<string, unknown> {
     return typeof x === "object" && x !== null;
 }
@@ -108,32 +167,86 @@ function getObj(obj: unknown, key: string): Record<string, unknown> | undefined 
 }
 
 /* ----------------------------------------------------------------------------
- * CDP (Chrome DevTools Protocol) opcional para frames WS binários
+ * CDP (Chrome DevTools Protocol) — Initiator + Redirect chain + WS frames
  * -------------------------------------------------------------------------- */
 
 /**
- * @brief Liga o DevTools Protocol em um WebContents para escutar frames de WebSocket.
- * @param ctx Contexto da aplicação (para emitir ao inspector).
- * @param wc  WebContents da janela onde os frames devem ser observados.
- * @returns função de detach (remove listeners e solta o debugger).
+ * @brief Liga o DevTools Protocol no WebContents:
+ *        - Network.requestWillBeSent → Initiator + cadeia de redirects
+ *        - Network.webSocket*        → Frames WS (texto/binário) resumidos
+ * @param ctx Contexto da app (para emitir ao Inspector)
+ * @param wc  WebContents que será observado
+ * @returns função de detach (remove listeners e solta o debugger)
  */
 function attachCdpNetwork(ctx: AppContext, wc: WebContents): () => void {
+    if (!config.enableCdp) return () => void 0;
+
+    // Mantém o tipo fixo para evitar never[]
+    interface CdpRequestInfo {
+        url: string;
+        chain: CdpRedirect[];
+        initiator?: CdpInitiator;
+    }
+
     try {
-        if (wc.debugger.isAttached()) {
-            // já anexado por outro trecho; não vamos interferir
-            return () => void 0;
-        }
+        if (wc.debugger.isAttached()) return () => void 0;
 
         wc.debugger.attach("1.3");
-        // Habilita domínio Network
-        void wc.debugger.sendCommand("Network.enable");
+        void wc.debugger.sendCommand("Network.enable", { maxPostDataSize: 0 });
 
-        // Mapeia requestId → url para lookup nos eventos de frame
+        // requestId → info
+        const rqs = new Map<string, CdpRequestInfo>();
+        // requestId → url (para mapear frames WS)
         const wsUrlById = new Map<string, string>();
 
         const onMessage = (_ev: unknown, method: string, params: unknown): void => {
             try {
-                // Network.webSocketCreated → guarda URL
+                // -------------------- Initiator + redirect chain --------------------
+                if (method === "Network.requestWillBeSent") {
+                    const id = String(getStr(params, "requestId") ?? "");
+                    const req = getObj(params, "request");
+                    const url = String((req && getStr(req, "url")) ?? "");
+                    if (!id || !url) return;
+
+                    const initObj = getObj(params, "initiator");
+                    const maybeInitiator: CdpInitiator | undefined = initObj
+                        ? {
+                            type: String(getStr(initObj, "type") ?? "other"),
+                            ...(getStr(initObj, "url") !== undefined ? { url: getStr(initObj, "url")! } : {}),
+                        }
+                        : undefined;
+
+                    // cria/recupera mantendo tipos estáveis
+                    let prev = rqs.get(id);
+                    if (!prev) {
+                        prev = { url, chain: [] as CdpRedirect[] };
+                        if (maybeInitiator) prev.initiator = maybeInitiator;
+                        rqs.set(id, prev);
+                    } else {
+                        prev.url = url;
+                        if (maybeInitiator) prev.initiator = maybeInitiator;
+                    }
+
+                    // redirect?
+                    const redirectResp = getObj(params, "redirectResponse");
+                    if (redirectResp) {
+                        const from = String(getStr(redirectResp, "url") ?? "");
+                        const statusNum = Number(getNum(redirectResp, "status") ?? 0);
+                        // prev.chain tem tipo CdpRedirect[] (não é never[])
+                        prev.chain.push({ from, to: url, status: statusNum });
+                    }
+
+                    const payload: CdpInitiatorPayload = {
+                        requestId: id,
+                        url,
+                        redirectChain: prev.chain,
+                        ...(prev.initiator ? { initiator: prev.initiator } : {}),
+                    };
+                    inspectorBroadcast(ctx, { channel: "cap:cdp:initiator", payload });
+                    return;
+                }
+
+                // -------------------- WebSocket bookkeeping --------------------
                 if (method === "Network.webSocketCreated") {
                     const reqId = getStr(params, "requestId");
                     const url = getStr(params, "url");
@@ -141,61 +254,55 @@ function attachCdpNetwork(ctx: AppContext, wc: WebContents): () => void {
                     return;
                 }
 
-                // Frame enviado
+                // -------------------- WS frame enviado -------------------------
                 if (method === "Network.webSocketFrameSent") {
                     const reqId = getStr(params, "requestId");
                     const response = getObj(params, "response");
                     const opcode = response ? getNum(response, "opcode") : undefined;
                     const payloadData = response ? getStr(response, "payloadData") : undefined;
+                    const url = reqId ? wsUrlById.get(reqId) : undefined;
 
-                    const url = (reqId && wsUrlById.get(reqId)) || undefined;
-                    inspectorBroadcast(ctx, {
-                        channel: "cap:ws:frame",
-                        payload: { ts: Date.now(), direction: "out", url, opCode: opcode, data: payloadData },
-                    });
+                    const frame: WsFramePayload = {
+                        ts: Date.now(),
+                        direction: "out",
+                        ...(url !== undefined ? { url } : {}),
+                        ...(opcode !== undefined ? { opCode: opcode } : {}),
+                        ...(payloadData !== undefined ? { data: payloadData } : {}),
+                    };
+                    inspectorBroadcast(ctx, { channel: "cap:ws:frame", payload: frame });
                     return;
                 }
 
-                // Frame recebido
+                // -------------------- WS frame recebido ------------------------
                 if (method === "Network.webSocketFrameReceived") {
                     const reqId = getStr(params, "requestId");
                     const response = getObj(params, "response");
                     const opcode = response ? getNum(response, "opcode") : undefined;
                     const payloadData = response ? getStr(response, "payloadData") : undefined;
+                    const url = reqId ? wsUrlById.get(reqId) : undefined;
 
-                    const url = (reqId && wsUrlById.get(reqId)) || undefined;
-                    inspectorBroadcast(ctx, {
-                        channel: "cap:ws:frame",
-                        payload: { ts: Date.now(), direction: "in", url, opCode: opcode, data: payloadData },
-                    });
+                    const frame: WsFramePayload = {
+                        ts: Date.now(),
+                        direction: "in",
+                        ...(url !== undefined ? { url } : {}),
+                        ...(opcode !== undefined ? { opCode: opcode } : {}),
+                        ...(payloadData !== undefined ? { data: payloadData } : {}),
+                    };
+                    inspectorBroadcast(ctx, { channel: "cap:ws:frame", payload: frame });
                     return;
                 }
-
-                // Opcional: Network.responseReceived → Network.getResponseBody(requestId)
-                // (se no futuro quiser corpo das respostas)
-            } catch (_e) {
-                // nunca propagar erro do listener
-                void 0;
+            } catch {
+                /* noop */
             }
         };
 
         wc.debugger.on("message", onMessage);
 
-        // detach
         return (): void => {
-            try {
-                wc.debugger.removeListener("message", onMessage);
-            } catch (_e) {
-                void 0;
-            }
-            try {
-                if (wc.debugger.isAttached()) wc.debugger.detach();
-            } catch (_e) {
-                void 0;
-            }
+            try { wc.debugger.removeListener("message", onMessage); } catch { /* noop */ }
+            try { if (wc.debugger.isAttached()) wc.debugger.detach(); } catch { /* noop */ }
         };
-    } catch (_e) {
-        // Falha ao anexar: apenas siga sem CDP
+    } catch {
         return () => void 0;
     }
 }
@@ -207,12 +314,14 @@ function attachCdpNetwork(ctx: AppContext, wc: WebContents): () => void {
 /**
  * @brief Para a captura: remove hooks, fecha artefatos, atualiza estado e UI.
  * @param ctx    AppContext
- * @param reason "user" (pedido explícito) | "inspector-closed" (fechou no X)
+ * @param reason "user" | "inspector-closed"
  */
 function stopCaptureInternal(
     ctx: AppContext,
     reason: "user" | "inspector-closed"
-): { capturing: false; out: { ok: true } } | { capturing: false; out: { ok: false; reason: string } } {
+):
+    | { capturing: false; out: { ok: true } }
+    | { capturing: false; out: { ok: false; reason: string } } {
     if (!isCapturing()) {
         broadcastState();
         return { capturing: false, out: { ok: false, reason: "not-running" } };
@@ -220,19 +329,11 @@ function stopCaptureInternal(
 
     try {
         // 1) Remover hooks webRequest
-        try {
-            detachWebRequest?.();
-        } catch (_e) {
-            void 0;
-        }
+        try { detachWebRequest?.(); } catch { /* noop */ }
         detachWebRequest = null;
 
         // 2) Detach CDP (se ligado)
-        try {
-            detachCdp?.();
-        } catch (_e) {
-            void 0;
-        }
+        try { detachCdp?.(); } catch { /* noop */ }
         detachCdp = null;
 
         // 3) Parar persistências/artefatos
@@ -242,9 +343,7 @@ function stopCaptureInternal(
         }
 
         // 4) Lidar com janela do Inspector
-        if (reason === "user") {
-            hideInspector(ctx);
-        }
+        if (reason === "user") hideInspector(ctx);
 
         return { capturing: false, out: { ok: true } };
     } finally {
@@ -256,46 +355,50 @@ function stopCaptureInternal(
  * Registro dos handlers IPC
  * -------------------------------------------------------------------------- */
 
-/**
- * @brief Registra os IPC handlers do fluxo de captura.
- */
+/** Registra os IPC handlers do fluxo de captura. */
 export function registerCaptureIpc(ctx: AppContext): void {
     /**
      * wirepeek:start
-     *  - Ativa hooks de captura (webRequest) na sessão da janela principal
      *  - Inicia sessão de gravação (HAR/NDJSON, conforme implementado)
+     *  - Ativa hooks de captura (webRequest) na sessão da janela principal
+     *    **já injetando `saveBody`** para persistência condicional
      *  - Abre Inspector e garante stop se fechar no "X"
-     *  - (Opcional) Liga CDP para frames WS binários
+     *  - (Opcional) Liga CDP para Initiator/Redirect e frames WS
      */
     ipcMain.handle("wirepeek:start", () => {
         if (!isCapturing() && ctx.mainWin && !ctx.mainWin.isDestroyed()) {
-            // Hooks de rede via webRequest
-            detachWebRequest = attachNetworkCapture(ctx.mainWin as BrowserWindow, (channel, payload) => {
-                const env = { channel, payload } as CapEnvelope;
-
-                // Persistência REST → HAR
-                if (capSession) {
-                    if (channel === "cap:rest:request") {
-                        capSession.onRestRequest(payload as RestRequestPayload);
-                    } else if (channel === "cap:rest:response") {
-                        capSession.onRestResponse(payload as RestResponsePayload);
-                    }
-                }
-
-                inspectorBroadcast(ctx, env);
-            });
-
-            // Sessão de gravação
+            // 1) Sessão de gravação
             capSession = new CaptureSession();
 
-            // (Opcional) CDP para frames WS (binário)
+            // 2) Hooks de rede via webRequest + injeção de saveBody
+            detachWebRequest = attachNetworkCapture(
+                ctx.mainWin as BrowserWindow,
+                (channel, payload) => {
+                    const env = { channel, payload } as CapEnvelope;
+
+                    // Persistência REST → HAR
+                    if (capSession) {
+                        if (channel === "cap:rest:request") {
+                            capSession.onRestRequest(payload as RestRequestPayload);
+                        } else if (channel === "cap:rest:response") {
+                            capSession.onRestResponse(payload as RestResponsePayload);
+                        }
+                    }
+
+                    inspectorBroadcast(ctx, env);
+                },
+                // injeta callback de salvar body em disco
+                { saveBody: capSession.saveBody.bind(capSession) }
+            );
+
+            // 3) CDP para Initiator/Redirect + WS frames
             try {
                 detachCdp = attachCdpNetwork(ctx, ctx.mainWin.webContents);
-            } catch (_e) {
+            } catch {
                 detachCdp = null;
             }
 
-            // Abre o Inspector e, se fechar no "X", paramos a captura + sincronizamos estado
+            // 4) Abre o Inspector e, se fechar no "X", paramos a captura
             openInspector(ctx, ctx.mainWin, {
                 onClosed: () => {
                     stopCaptureInternal(ctx, "inspector-closed");
@@ -308,13 +411,8 @@ export function registerCaptureIpc(ctx: AppContext): void {
         return { capturing: isCapturing() };
     });
 
-    /**
-     * wirepeek:stop
-     *  - Para a captura sob demanda do usuário (UI principal)
-     */
-    ipcMain.handle("wirepeek:stop", () => {
-        return stopCaptureInternal(ctx, "user");
-    });
+    /** wirepeek:stop — para captura sob demanda do usuário (UI principal) */
+    ipcMain.handle("wirepeek:stop", () => stopCaptureInternal(ctx, "user"));
 
     /** Estado atual sob demanda */
     ipcMain.handle("wirepeek:getState", () => ({ capturing: isCapturing() }));
@@ -346,10 +444,10 @@ export function registerCaptureIpc(ctx: AppContext): void {
                     capSession.onWsError?.(env.payload as WsErrorPayload);
                     break;
                 case "cap:txn":
-                    // Se desejar salvar transações agregadas em NDJSON:
+                    // Se quiser salvar transações agregadas em NDJSON:
                     // capSession.pushTxnNdjson?.(env.payload as CapTxn);
                     break;
-                // "cap:ws:frame" (CDP) atualmente só é encaminhado ao inspector.
+                // "cap:ws:frame" e "cap:cdp:initiator" vão só para o Inspector por enquanto.
                 default:
                     break;
             }

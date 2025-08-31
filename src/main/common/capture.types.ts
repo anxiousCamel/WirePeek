@@ -1,9 +1,12 @@
 // src/common/capture.types.ts
 /**
- * Tipos compartilhados entre main/preload/inspector
- * para a captura e agregação de requisições/respostas.
+ * @file src/common/capture.types.ts
+ * @brief Tipos compartilhados entre main / preload / inspector para captura e agregação.
  */
 
+/**
+ * @typedef {"GET"|"POST"|"PUT"|"PATCH"|"DELETE"|"HEAD"|"OPTIONS"} HttpMethod
+ */
 export type HttpMethod =
     | "GET"
     | "POST"
@@ -13,94 +16,110 @@ export type HttpMethod =
     | "HEAD"
     | "OPTIONS";
 
-/** Marcação temporal da transação */
+/**
+ * @typedef CapTiming
+ * @brief Marcações temporais da transação.
+ * @property {number} startTs       Epoch ms do início da request
+ * @property {number} [firstByteTs] Epoch ms do 1º byte recebido (quando disponível)
+ * @property {number} [endTs]       Epoch ms do término da response
+ */
 export interface CapTiming {
-    /** Timestamp (ms) quando a request começou */
     startTs: number;
-    /** Primeiro byte recebido (ms), se disponível */
     firstByteTs?: number;
-    /** Timestamp (ms) quando a response terminou */
     endTs?: number;
 }
 
-/** Mapa simples de cabeçalhos normalizados (minúsculos) */
+/**
+ * @typedef HeaderMap
+ * @brief Mapa simples de cabeçalhos normalizados (chaves minúsculas).
+ */
 export type HeaderMap = Record<string, string>;
 
-/** Request capturada (lado de saída) */
+/**
+ * @typedef CapReq
+ * @brief Request capturada (lado de saída).
+ * @property {string} id                 ID interno correlacionando req/resp (ex.: d.id do Electron em string)
+ * @property {HttpMethod} method         Método HTTP normalizado
+ * @property {string} url                URL completa
+ * @property {string} host               host:porta (ex.: "example.com:443")
+ * @property {string} path               Apenas o pathname (ex.: "/api/v1/users/123")
+ * @property {Record<string,string>} query Query string já parseada (simples; evolui se precisar arrays)
+ * @property {HeaderMap} headers         Cabeçalhos “seguros” (sem cookies/authorization — ver filtro no capture)
+ * @property {CapTiming} timing          Marcações de tempo (start sempre preenchido)
+ * @property {Uint8Array} [bodyBytes]    Corpo bruto quando capturado (opcional)
+ * @property {string} [bodyTextSnippet]  Trecho UTF-8 para visualização rápida (opcional)
+ */
 export interface CapReq {
-    /** ID interno correlacionando req/resp (usa d.id do Electron convertido p/ string) */
     id: string;
-    /** Método HTTP normalizado */
     method: HttpMethod;
-    /** URL completa */
     url: string;
-    /** host:porta (ex.: example.com:443) */
     host: string;
-    /** apenas o pathname (ex.: /api/v1/users/123) */
     path: string;
-    /** query string já parseada (use simples; se precisar array, evoluímos depois) */
     query: Record<string, string>;
-    /** Cabeçalhos “seguros” (sem cookies/authorization, etc. — ver filtro no capture.ts) */
     headers: HeaderMap;
-    /** Marcações de tempo (start é sempre preenchido) */
     timing: CapTiming;
 
-    /** Corpo (bytes) quando capturado, opcional */
     bodyBytes?: Uint8Array;
-    /** Trecho em texto do body (cortado), opcional e apenas para visualização rápida */
     bodyTextSnippet?: string;
 }
 
-/** Response capturada (lado de entrada) */
+/**
+ * @typedef CapResp
+ * @brief Response capturada (lado de entrada).
+ * @property {string} id                 Mesmo id da request correspondente
+ * @property {number} status             Código HTTP (ex.: 200, 404, 500)
+ * @property {string} [statusText]       Texto de status (ex.: "OK")
+ * @property {HeaderMap} headers         Cabeçalhos normalizados
+ * @property {string} [contentType]      Content-Type detectado (ex.: "application/json; charset=utf-8")
+ * @property {number} [sizeBytes]        Tamanho do corpo em bytes (após decodificar gzip/br), quando conhecido
+ * @property {Uint8Array} [bodyBytes]    Corpo bruto quando capturado (opcional)
+ * @property {string} [bodyTextSnippet]  Trecho UTF-8 para visualização rápida (opcional)
+ * @property {CapTiming} timing          Marcações de tempo (start, firstByte, end)
+ * @property {boolean} [fromCache]       Indica se veio do cache (quando fornecido pelo Electron)
+ * @property {string} [bodyFile]         **NOVO**: caminho absoluto do arquivo em disco (quando persistido)
+ */
 export interface CapResp {
-    /** Mesmo id da request correspondente */
     id: string;
-    /** Código HTTP (ex.: 200, 404, 500) */
     status: number;
-    /** Texto de status se disponível (ex.: "OK") */
     statusText?: string;
-    /** Cabeçalhos normalizados */
     headers: HeaderMap;
-    /** Content-Type detectado */
     contentType?: string;
-    /** Tamanho do corpo em bytes (depois de decodificar gzip/br), quando conhecido */
     sizeBytes?: number;
 
-    /** Corpo (bytes) quando capturado, opcional */
     bodyBytes?: Uint8Array;
-    /** Trecho em texto do body (cortado), opcional e apenas para visualização rápida */
     bodyTextSnippet?: string;
 
-    /** Marcações de tempo (start, firstByte, end) */
     timing: CapTiming;
-
-    /** Indica se veio do cache (quando fornecido pelo Electron) */
     fromCache?: boolean;
+
+    // Quando onCompleted decidir persistir o corpo em disco (opt-in + políticas),
+    // este campo carrega o caminho para carregamento sob demanda no Inspector.
+    bodyFile?: string;
 }
 
-/** Transação agregada mostrada no Inspector (req + resp + metadados) */
+/**
+ * @typedef CapTxn
+ * @brief Transação agregada mostrada no Inspector (req + resp + metadados).
+ * @property {string} id                 Mesmo id compartilhado entre req/resp
+ * @property {HttpMethod} method         Método HTTP
+ * @property {string} host               Host de destino
+ * @property {string} path               Path original (sem normalização)
+ * @property {string} routeKey           Chave p/ agrupar rotas semelhantes (ex.: host + pathname normalizado)
+ * @property {string} [queryStr]         Query string crua (sem ‘?’), se desejar exibir
+ * @property {CapReq} req                Request completa
+ * @property {CapResp} [resp]            Response (se já recebida)
+ * @property {number} [durationMs]       Duração total em ms (resp.endTs - req.startTs), quando disponível
+ */
 export interface CapTxn {
-    /** Mesmo id compartilhado entre req/resp */
     id: string;
-    /** Método HTTP */
     method: HttpMethod;
-    /** Host de destino */
     host: string;
-    /** Path original (sem normalização) */
     path: string;
-    /**
-     * Chave de agrupamento (ex.: host + pathname normalizado via computeRouteKey)
-     * usada para “juntar” rotas semelhantes sem perder o domínio.
-     */
     routeKey: string;
-    /** Query string crua (sem ‘?’), se você quiser exibir */
     queryStr?: string;
 
-    /** Request completa */
     req: CapReq;
-    /** Response (se já recebida) */
     resp?: CapResp;
 
-    /** Duração total em ms (resp.endTs - req.startTs), quando disponível */
     durationMs?: number;
 }

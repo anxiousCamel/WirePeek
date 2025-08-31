@@ -15,17 +15,28 @@ import {
   type OnErrorOccurredListenerDetails,
 } from "electron";
 import * as zlib from "zlib";
+// opcional (diagnóstico)
 import dns from "dns";
 import { URL } from "url";
+
 import { config } from "./config";
 import { onReq, onResp } from "./capture.agg";
 import type {
   CapReq,
-  CapResp,
+  CapResp,      // ⚠ Garanta que este tipo tenha `bodyFile?: string`
   CapTiming,
   HttpMethod,
-  CapTxn,
+  CapTxn
 } from "../common/capture.types";
+
+// Garantia: mesmo que haja algum import duplicado durante a refatoração,
+// esta extensão assegura que CapResp tenha `bodyFile`.
+declare module "../common/capture.types" {
+  interface CapResp {
+    bodyFile?: string;
+  }
+}
+
 
 /* ============================================================================
  *                              Tipos de evento
@@ -65,6 +76,16 @@ type OnEventFn = (
   channel: CapChannel,
   payload: RestRequestPayload | RestResponsePayload | CapTxn
 ) => void;
+
+/** Descriptor retornado por `saveBody` quando persistimos corpo em disco. */
+type SavedBodyInfo = { path: string; size: number; contentType?: string };
+
+/** Callback opcional para salvar body em disco (injetado por quem tem a sessão). */
+type SaveBodyFn = (
+  idHint: string,
+  buf: Uint8Array,
+  contentType?: string
+) => SavedBodyInfo;
 
 /* ============================================================================
  *                                   Utils
@@ -108,7 +129,8 @@ function toSafeHeaderMap(
   headers: Record<string, string | string[]> | undefined
 ): Record<string, string> {
   if (!headers) return {};
-  const allow = new Set([
+  // Atenção: inclui Authorization/Cookie somente se NÃO estiver redatando segredos
+  const allow = new Set<string>([
     "content-type",
     "content-length",
     "accept",
@@ -119,7 +141,7 @@ function toSafeHeaderMap(
     "host",
     "cache-control",
     "pragma",
-    (config.redactSecrets ? [] : ["authorization","cookie"])
+    ...(!config.redactSecrets ? ["authorization", "cookie"] : []),
   ]);
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(headers)) {
@@ -174,21 +196,6 @@ function bytesToU8(data: ArrayBuffer | Buffer): Uint8Array {
     ? new Uint8Array(data)
     : new Uint8Array(data as ArrayBuffer);
 }
-
-
-/**
- * @brief Converte entradas genéricas em `Uint8Array` quando possível.
- * @param data Valor desconhecido.
-function toUint8Array(data: unknown): Uint8Array | undefined {
-  if (data == null) return undefined;
-  type BufferCtor = typeof Buffer & { isBuffer?(x: unknown): x is Buffer };
-  const Buf = Buffer as BufferCtor;
-  if (typeof Buf?.isBuffer === "function" && Buf.isBuffer(data)) return new Uint8Array(data);
-  if (data instanceof Uint8Array) return data;
-  if (data instanceof ArrayBuffer) return new Uint8Array(data);
-  return undefined;
-}
-*/
 
 /* ============================================================================
  *                     Estado interno (indexado por requestId)
@@ -283,9 +290,14 @@ function mergeUploadData(list?: ReadonlyArray<UploadItem>): Uint8Array | undefin
  * @brief Registra hooks de captura na sessão da janela e retorna função de detach.
  * @param win     Janela principal (fonte da `session` a ser capturada).
  * @param onEvent Callback para encaminhar eventos às UIs/persistência.
+ * @param opts    Opções; pode conter `saveBody` para persistir corpos em disco.
  * @returns Função para remover todos os hooks e limpar estado.
  */
-export function attachNetworkCapture(win: BrowserWindow, onEvent?: OnEventFn): () => void {
+export function attachNetworkCapture(
+  win: BrowserWindow,
+  onEvent?: OnEventFn,
+  opts?: { saveBody?: SaveBodyFn }
+): () => void {
   const ses = win.webContents.session;
   const filter: WebRequestFilter = { urls: ["*://*/*"] };
 
@@ -418,6 +430,7 @@ export function attachNetworkCapture(win: BrowserWindow, onEvent?: OnEventFn): (
         timingMs,
       } as RestResponsePayload);
 
+      // --- corpo em memória (opcional) ---
       let bodyBuf: Uint8Array | undefined;
       if (acc && acc.bodyChunks.length) {
         const concat = new Uint8Array(acc.bodySize);
@@ -447,6 +460,25 @@ export function attachNetworkCapture(win: BrowserWindow, onEvent?: OnEventFn): (
       // Algumas versões expõem 'fromCache' no objeto (não tipado)
       const withCache = d as OnCompletedListenerDetails & Partial<{ fromCache: boolean }>;
       if (withCache.fromCache !== undefined) capResp.fromCache = withCache.fromCache;
+
+      // ================= (b) Decidir quando gravar em disco =================
+      // Regra: respeita config.captureBodies + content-type permitido + limite de bytes
+      let savedBody: SavedBodyInfo | undefined;
+      const allowByCt = !!ct && new RegExp(config.captureBodyTypes, "i").test(ct);
+      const allowBySize = !!(bodyBuf && bodyBuf.byteLength <= config.captureBodyMaxBytes);
+
+      if (config.captureBodies && bodyBuf && allowByCt && allowBySize && opts?.saveBody) {
+        try {
+          savedBody = opts.saveBody(String(d.id), bodyBuf, ct);
+        } catch {
+          // falhas de IO não devem quebrar a captura
+        }
+      }
+      if (savedBody) {
+        // ⚠ Requer que CapResp tenha esta propriedade opcional
+        capResp.bodyFile = savedBody.path;
+      }
+      // =====================================================================
 
       const txn = onResp(capResp);
       if (txn) emit("cap:txn", txn);
