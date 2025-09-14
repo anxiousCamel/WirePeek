@@ -1,23 +1,13 @@
 /**
  * @file src/main/capture.session.ts
- * @brief Gera HAR (REST) e NDJSON (WS/txn) a partir dos eventos de captura.
- *        - Escreve HAR em disco ao finalizar.
- *        - WS em NDJSON via stream append.
- *        - (Novo) Suporte a persistência de bodies de resposta em disco, com
- *          inclusão opcional do caminho no HAR via campos customizados `_file`.
+ * @brief Sessão de gravação da captura:
+ *   - HAR (REST mínimo; content._file aponta para arquivo salvo quando houver)
+ *   - NDJSON de eventos WebSocket (open/msg/close/error)
+ *   - Persistência opcional de bodies de resposta em disco
  *
- * @details
- *  Este módulo é responsável por materializar artefatos em disco:
- *   • HAR de requisições REST (mínimo viável, com campos customizados `_file`)
- *   • NDJSON de eventos WebSocket (open/msg/close/error)
- *   • (Novo) Diretório `bodies-<timestamp>` para armazenar corpos de resposta
- *     quando permitido pela configuração.
- *
- *  Para salvar bodies, chame:
- *     - saveBody(idHint, bytes, contentType?)         → retorna SavedBodyInfo
- *     - noteResponseBody(method, url, savedBodyInfo)  → associa ao par (method+url)
- *  Em seguida, quando `onRestResponse` for chamado para o mesmo (method+url),
- *  o HAR será enriquecido com referências ao arquivo persistido.
+ * Requisitos externos:
+ *   - ./fsutil: ensureDir, openAppendStream, writeJsonLine, timestamp
+ *   - ./config: { outputFolder, captureBodies, captureBodyMaxBytes, captureBodyTypes, redactSecrets }
  */
 
 import fs from "fs";
@@ -25,12 +15,13 @@ import path from "path";
 import { app } from "electron";
 import { ensureDir, openAppendStream, writeJsonLine, timestamp } from "./fsutil";
 import { config } from "./config";
+import type { CapTxn } from "../common/capture.types";
 
-/* ============================================================================
- * Tipos dos eventos REST/WS recebidos
- * ========================================================================== */
+/* =======================================================================================
+ * Tipos mínimos esperados pelos produtores de eventos (main/capture & IPC)
+ * =======================================================================================
+ */
 
-/** Evento (mínimo) da request vindo do pipeline do main/capture */
 type RestReq = {
   ts: number;
   url: string;
@@ -39,7 +30,6 @@ type RestReq = {
   reqBody?: string;
 };
 
-/** Evento (mínimo) da response vindo do pipeline do main/capture */
 type RestRes = {
   ts: number;
   url: string;
@@ -51,14 +41,16 @@ type RestRes = {
   timingMs: number;
 };
 
-type WsOpen = { ts: number; id: string; url: string; protocols?: string | string[] };
-type WsMsg = { ts: number; id: string; dir: "in" | "out"; data: string };
-type WsClose = { ts: number; id: string; code: number; reason: string };
-type WsError = { ts: number; id: string };
+export type SavedBodyInfo = {
+  path: string;
+  size: number;
+  contentType?: string;
+};
 
-/* ============================================================================
- * Tipos (HAR mínimo) — com campos customizados
- * ========================================================================== */
+/* =======================================================================================
+ * Definições HAR mínimas (com extensões customizadas)
+ * =======================================================================================
+ */
 
 type HarHeader = { name: string; value: string };
 type HarPostData = { mimeType: string; text: string };
@@ -76,10 +68,7 @@ type HarContent = {
   size: number;
   mimeType: string;
   text: string;
-  /**
-   * @custom Campo customizado: caminho do arquivo do body salvo no disco
-   * (relativo à pasta base de saída). Não faz parte do HAR 1.2.
-   */
+  /** (custom) Caminho relativo do arquivo salvo em disco. */
   _file?: string;
 };
 
@@ -91,9 +80,7 @@ type HarResponse = {
   headersSize: number;
   bodySize: number;
   content: HarContent;
-  /**
-   * @custom Indica que dados sensíveis foram redigidos no HAR.
-   */
+  /** (custom) Indica que campos sensíveis foram redigidos. */
   _redacted?: boolean;
 };
 
@@ -121,84 +108,17 @@ type HarLog = {
 };
 type HarFile = { log: HarLog };
 
-/* ============================================================================
- * Agregado (txn)
- * ========================================================================== */
-import type { CapTxn } from "../common/capture.types";
-
-/* ============================================================================
- * Persistência de body
- * ========================================================================== */
-
-/**
- * Descriptor do body salvo em disco.
- */
-export type SavedBodyInfo = {
-  /** Caminho absoluto do arquivo salvo. */
-  path: string;
-  /** Tamanho em bytes do arquivo salvo. */
-  size: number;
-  /** Content-Type reportado/assumido para o arquivo. */
-  contentType?: string;
-};
-
-/* ============================================================================
+/* =======================================================================================
  * Utils internos
- * ========================================================================== */
-
-/**
- * Cria chave de correlação (method + url).
+ * =======================================================================================
  */
+
 function reqKey(method: string, url: string): string {
   return `${method} ${url}`;
 }
-
-/**
- * Decide se um body pode/vale a pena ser persistido,
- * respeitando os flags de configuração.
- */
-function shouldPersistBody(contentType: string | undefined, size: number): boolean {
-  if (!config.captureBodies) return false;
-  if (size <= 0) return false;
-  if (size > config.captureBodyMaxBytes) return false;
-
-  const ct = (contentType || "").toLowerCase();
-  const rx = new RegExp(config.captureBodyTypes);
-  return rx.test(ct);
-}
-
-/**
- * Redige campos sensíveis em uma string (best-effort).
- * Evita vazar tokens/segredos em HAR legível.
- */
-function redactText(input: string): string {
-  if (!config.redactSecrets) return input;
-  let out = input;
-
-  // JSON keys comuns: password / token / secret / authorization / apiKey
-  // NOTE: heurística propositalmente simples para não quebrar payloads.
-  out = out.replace(/"password"\s*:\s*"([^"]+)"/gi, '"password":"***"');
-  out = out.replace(/"pass"\s*:\s*"([^"]+)"/gi, '"pass":"***"');
-  out = out.replace(/"token"\s*:\s*"([^"]+)"/gi, '"token":"***"');
-  out = out.replace(/"secret"\s*:\s*"([^"]+)"/gi, '"secret":"***"');
-  out = out.replace(/"apiKey"\s*:\s*"([^"]+)"/gi, '"apiKey":"***"');
-
-  // Campos em formato x-www-form-urlencoded
-  out = out.replace(/\b(password|pass|token|secret|apiKey)=([^&]+)/gi, (_m, k) => `${k}=***`);
-
-  return out;
-}
-
-/**
- * Converte headers (Record) para pares do HAR.
- */
-function toHarHeaders(h: Record<string, string> | undefined): HarHeader[] {
+function toHarHeaders(h?: Record<string, string>): HarHeader[] {
   return Object.entries(h ?? {}).map(([name, value]) => ({ name, value }));
 }
-
-/**
- * Retorna caminho relativo à base para exibir no HAR (ao invés de absoluto).
- */
 function toRelative(baseDir: string, fullPath: string): string {
   try {
     return path.relative(baseDir, fullPath).replace(/\\/g, "/");
@@ -206,15 +126,40 @@ function toRelative(baseDir: string, fullPath: string): string {
     return fullPath;
   }
 }
+function redactText(s: string): string {
+  if (!config.redactSecrets) return s;
+  return s
+    .replace(/"password"\s*:\s*"([^"]+)"/gi, '"password":"***"')
+    .replace(/"pass"\s*:\s*"([^"]+)"/gi, '"pass":"***"')
+    .replace(/"token"\s*:\s*"([^"]+)"/gi, '"token":"***"')
+    .replace(/"secret"\s*:\s*"([^"]+)"/gi, '"secret":"***"')
+    .replace(/"apiKey"\s*:\s*"([^"]+)"/gi, '"apiKey":"***"')
+    .replace(/\b(password|pass|token|secret|apiKey)=([^&]+)/gi, (_m, k) => `${k}=***`);
+}
+function shouldPersistBody(contentType: string | undefined, size: number): boolean {
+  if (!config.captureBodies) return false;
+  if (size <= 0) return false;
+  if (size > config.captureBodyMaxBytes) return false;
+  const ct = (contentType || "").toLowerCase();
+  const rx = new RegExp(config.captureBodyTypes);
+  return rx.test(ct);
+}
 
-
-/* ============================================================================
+/* =======================================================================================
  * Classe principal
- * ========================================================================== */
+ * =======================================================================================
+ */
 
 /**
  * @class CaptureSession
- * @brief Sessão de gravação de artefatos de captura (HAR/NDJSON + bodies).
+ * @brief Gerencia artefatos de uma sessão de captura (HAR, NDJSON e bodies).
+ *
+ * Fluxo:
+ *   const s = new CaptureSession();
+ *   s.onRestRequest(...);
+ *   s.onRestResponse(...);
+ *   s.onWsOpen/msg/close/error(...);
+ *   s.stop();
  */
 export class CaptureSession {
   private baseDir: string;
@@ -223,34 +168,23 @@ export class CaptureSession {
   private wsStream: fs.WriteStream;
   private har: HarFile;
 
-  /** correlaciona última request por (method + url) */
-  private lastReq: Map<string, RestReq> = new Map();
-
-  /** bodies salvos correlacionados por (method + url) — sobrescreve o último */
-  private savedBodies: Map<string, SavedBodyInfo> = new Map();
-
-  /** subpasta onde os bodies ficam salvos (bodies-<timestamp>) */
+  private lastReq = new Map<string, RestReq>();
+  private savedBodies = new Map<string, SavedBodyInfo>();
   private bodiesDir: string;
 
-  /** FD do arquivo NDJSON de txns; usar null como sentinela (evita undefined). */
   private ndjsonFd: number | null = null;
 
-  /**
-   * @constructor
-   * Prepara diretórios e arquivos base da sessão.
-   */
   constructor() {
     const t = timestamp();
 
-    // Pasta base para artefatos
+    // Base e subpasta para bodies
     this.baseDir = path.resolve(app.getAppPath(), "..", config.outputFolder);
     ensureDir(this.baseDir);
 
-    // Subpasta para bodies
     this.bodiesDir = path.join(this.baseDir, `bodies-${t}`);
     ensureDir(this.bodiesDir);
 
-    // Arquivos de saída
+    // Saídas
     this.harPath = path.join(this.baseDir, `rest-${t}.har`);
     this.wsPath = path.join(this.baseDir, `ws-${t}.wslog.ndjson`);
     this.wsStream = openAppendStream(this.wsPath);
@@ -271,210 +205,123 @@ export class CaptureSession {
     };
   }
 
-  /**
-   * @method stop
-   * @brief Persiste HAR e fecha stream de WS.
-   */
+  /** Persiste o HAR/NDJSON e encerra recursos. */
   stop(): void {
-    try {
-      fs.writeFileSync(this.harPath, JSON.stringify(this.har, null, 2), "utf8");
-    } catch (e) {
-      console.debug("[cap] failed to write HAR:", e);
-    }
-    try {
-      this.wsStream.close();
-    } catch (e) {
-      console.debug("[cap] failed to close ws log stream:", e);
-    }
+    try { fs.writeFileSync(this.harPath, JSON.stringify(this.har, null, 2), "utf8"); } catch {/**/}
+    try { this.wsStream.close(); } catch {/**/}
     this.stopNdjson();
   }
 
-  /* ------------------------------------------------------------------------
-   * NDJSON (CapTxn) — opcional
-   * ---------------------------------------------------------------------- */
+  // ----- NDJSON opcional para CapTxn -----
 
-  /**
-   * @method startNdjson
-   * @brief Abre arquivo NDJSON para transações agregadas.
-   */
   startNdjson(filePath: string): void {
     this.ndjsonFd = fs.openSync(filePath, "w");
   }
-
-  /**
-   * @method pushTxnNdjson
-   * @brief Acrescenta uma transação agregada em linha NDJSON.
-   */
   pushTxnNdjson(tx: CapTxn): void {
     const fd = this.ndjsonFd;
     if (fd == null) return;
     fs.writeSync(fd, JSON.stringify(tx) + "\n");
   }
-
-  /**
-   * @method stopNdjson
-   * @brief Fecha o FD do NDJSON (se aberto).
-   */
   stopNdjson(): void {
     const fd = this.ndjsonFd;
     if (fd != null) {
-      fs.closeSync(fd);
+      try { fs.closeSync(fd); } catch {/**/}
       this.ndjsonFd = null;
     }
   }
 
-  /* ------------------------------------------------------------------------
-   * REST
-   * ---------------------------------------------------------------------- */
+  // ----- REST → HAR -----
 
-  /**
-   * @method onRestRequest
-   * @brief Memoriza a última request por (method + url) para compor o HAR.
-   */
   onRestRequest(d: RestReq): void {
-    const key = reqKey(d.method, d.url);
-    this.lastReq.set(key, d);
+    this.lastReq.set(reqKey(d.method, d.url), d);
   }
 
-  /**
-   * @method saveBody
-   * @brief Salva body bruto em arquivo e retorna o descriptor.
-   */
   saveBody(idHint: string, buf: Uint8Array, contentType?: string): SavedBodyInfo {
     const safe = idHint.replace(/[^\w.-]+/g, "_").slice(0, 64);
     const fname = `${Date.now()}_${safe}.bin`;
     const full = path.join(this.bodiesDir, fname);
     fs.writeFileSync(full, Buffer.from(buf));
-
-    // Não inclua contentType quando for undefined (por causa do exactOptionalPropertyTypes)
-    const info: SavedBodyInfo = {
-      path: full,
-      size: buf.byteLength,
-      ...(contentType ? { contentType } : {}),
-    };
-    return info;
+    return { path: full, size: buf.byteLength, ...(contentType ? { contentType } : {}) };
   }
 
-  /**
-   * @method noteResponseBody
-   * @brief Correlaciona um body previamente salvo ao par (method + url).
-   *
-   * @param method   Método HTTP.
-   * @param url      URL exata da resposta.
-   * @param info     Descriptor retornado por `saveBody`.
-   *
-   * @example
-   *  const info = capSession.saveBody(url, bodyBytes, ct);
-   *  capSession.noteResponseBody(method, url, info);
-   */
   noteResponseBody(method: string, url: string, info: SavedBodyInfo): void {
     this.savedBodies.set(reqKey(method, url), info);
   }
 
-  /**
-   * @method onRestResponse
-   * @brief Gera uma entry HAR a partir da response + última request correlata.
-   *        Se houver `SavedBodyInfo` para esse (method+url), referencia o arquivo
-   *        no campo customizado `content._file`.
-   */
   onRestResponse(d: RestRes): void {
     const key = reqKey(d.method, d.url);
     const req = this.lastReq.get(key);
 
-    // started/time 100% numérico (sem undefined)
-    const startedTs: number = req?.ts !== undefined ? req.ts : (d.ts - d.timingMs);
-    const totalTimeMs: number = d.timingMs;
+    const startedTs = req?.ts ?? d.ts - d.timingMs;
 
-    const requestHeaders: HarHeader[] = toHarHeaders(req?.reqHeaders);
-    const responseHeaders: HarHeader[] = toHarHeaders(d.resHeaders);
-
-    // Request body (apenas texto curto; redigido se ativado)
     const rawReqBody = req?.reqBody;
-    const reqBodyText = rawReqBody ? redactText(rawReqBody) : undefined;
-
     const request: HarRequest = {
       method: d.method,
       url: d.url,
       httpVersion: "HTTP/2.0",
-      headers: requestHeaders,
+      headers: toHarHeaders(req?.reqHeaders),
       headersSize: -1,
       bodySize: rawReqBody ? rawReqBody.length : 0,
-      ...(reqBodyText
-        ? {
-          postData: {
-            mimeType: (req?.reqHeaders["content-type"] ?? "text/plain"),
-            text: reqBodyText,
-          } as HarPostData,
-        }
-        : {}),
+      ...(rawReqBody ? {
+        postData: {
+          mimeType: req?.reqHeaders["content-type"] ?? "text/plain",
+          text: redactText(rawReqBody),
+        },
+      } : {}),
     };
 
-    // Decide se há body salvo para esta resposta
     const saved = this.savedBodies.get(key);
     const ct = d.resHeaders["content-type"] ?? saved?.contentType ?? "";
-    const canPersist = saved
-      ? true
-      : shouldPersistBody(ct, d.bodySize);
 
-    // Monta content do HAR (referenciando arquivo quando houver)
     const content: HarContent = {
       size: d.bodySize,
       mimeType: ct,
-      // por padrão, não colocamos texto do body no HAR para evitar explosão
-      // de tamanho; o arquivo físico é referenciado em _file.
       text: "",
-      ...(saved
-        ? { _file: toRelative(this.baseDir, saved.path) }
-        : {}),
+      ...(saved ? { _file: toRelative(this.baseDir, saved.path) } : {}),
     };
+
+    if (!saved && shouldPersistBody(ct, d.bodySize)) {
+      // No-op aqui (persistência real deve ocorrer em quem tem os bytes).
+    }
 
     const response: HarResponse = {
       status: d.status,
       statusText: d.statusText,
       httpVersion: "HTTP/2.0",
-      headers: responseHeaders,
+      headers: toHarHeaders(d.resHeaders),
       headersSize: -1,
       bodySize: d.bodySize,
       content,
       ...(config.redactSecrets ? { _redacted: true } : {}),
     };
 
-    // Se não havia arquivo salvo, mas a política permitir, criamos um *placeholder*.
-    // OBS: salvar realmente os bytes deve ser feito onde você já tem `bodyBytes`.
-    // Aqui apenas marcamos que "poderia" salvar (sem tocar no disco),
-    // mantendo a implementação desacoplada.
-    if (!saved && canPersist) {
-      // Nada a fazer aqui por padrão; `saveBody` + `noteResponseBody` devem ser
-      // chamados por quem possui os bytes (ex.: capture.ts).
-      // Mantemos `content.text = ""` e sem `_file`.
-    }
-
     const entry: HarEntry = {
       startedDateTime: new Date(startedTs).toISOString(),
-      time: totalTimeMs,
+      time: d.timingMs,
       request,
       response,
       cache: {},
-      timings: { send: 0, wait: totalTimeMs, receive: 0 },
+      timings: { send: 0, wait: d.timingMs, receive: 0 },
       pageref: "page_1",
     };
 
     this.har.log.entries.push(entry);
-
-    // limpeza do correlacionamento (para evitar reaproveitar em outra resposta igual)
     this.lastReq.delete(key);
     this.savedBodies.delete(key);
   }
 
-  /* ------------------------------------------------------------------------
-   * WS → NDJSON
-   * ---------------------------------------------------------------------- */
-  /** @method onWsOpen */
-  onWsOpen(d: WsOpen): void { writeJsonLine(this.wsStream, { type: "open", ...d }); }
-  /** @method onWsMsg  */
-  onWsMsg(d: WsMsg): void { writeJsonLine(this.wsStream, { type: "msg", ...d }); }
-  /** @method onWsClose*/
-  onWsClose(d: WsClose): void { writeJsonLine(this.wsStream, { type: "close", ...d }); }
-  /** @method onWsError*/
-  onWsError(d: WsError): void { writeJsonLine(this.wsStream, { type: "error", ...d }); }
+  // ----- WebSocket → NDJSON -----
+
+  onWsOpen(d: { ts: number; id: string; url: string; protocols?: string | string[] }): void {
+    void writeJsonLine(this.wsStream, { type: "open", ...d });
+  }
+  onWsMsg(d: { ts: number; id: string; dir: "in" | "out"; data: string }): void {
+    void writeJsonLine(this.wsStream, { type: "msg", ...d });
+  }
+  onWsClose(d: { ts: number; id: string; code: number; reason: string }): void {
+    void writeJsonLine(this.wsStream, { type: "close", ...d });
+  }
+  onWsError(d: { ts: number; id: string }): void {
+    void writeJsonLine(this.wsStream, { type: "error", ...d });
+  }
 }

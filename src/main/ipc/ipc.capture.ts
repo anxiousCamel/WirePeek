@@ -12,14 +12,14 @@
  */
 
 import { ipcMain, BrowserWindow, webContents, type WebContents } from "electron";
-import type { AppContext } from "../context.js";
+import type { AppContext } from "../context";
 import {
     attachNetworkCapture,
     type RestRequestPayload,
     type RestResponsePayload,
-} from "../capture.js";
-import { CaptureSession } from "../capture.session.js";
-import { openInspector, hideInspector } from "../win.inspector.js";
+} from "../capture";
+import { CaptureSession } from "../capture.session";
+import { openInspector, hideInspector } from "../win.inspector";
 import { config } from "../config";
 import type { CapTxn } from "../common/capture.types";
 
