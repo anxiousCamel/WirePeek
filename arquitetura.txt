@@ -1,0 +1,66 @@
+WirePeek
+
+├── src
+│   ├── common
+│   │   └── capture.types.ts
+│   ├── Inspector
+│   │   ├── filters.js
+│   │   ├── index.html
+│   │   ├── style.css
+│   │   └── ui.js
+│   ├── main
+│   │   ├── common
+│   │   │   └── capture.types.ts
+│   │   ├── ipc
+│   │   │   ├── index.ts
+│   │   │   ├── ipc.capture.ts
+│   │   │   ├── ipc.creds.ts
+│   │   │   ├── ipc.history.ts
+│   │   │   ├── ipc.nav.ts
+│   │   │   └── ipc.window.ts
+│   │   ├── assets.ts
+│   │   ├── capture.agg.ts
+│   │   ├── capture.session.ts
+│   │   ├── capture.ts
+│   │   ├── config.ts
+│   │   ├── context.ts
+│   │   ├── creds.ts
+│   │   ├── fsutil.ts
+│   │   ├── history.store.ts
+│   │   ├── main.ts
+│   │   ├── session.profile.ts
+│   │   ├── win.inspector.ts
+│   │   └── win.main.ts
+│   ├── preload
+│   │   ├── globals.d.ts
+│   │   ├── preload.inspector.ts
+│   │   ├── preload.ts
+│   │   └── webview.preload.ts
+│   ├── renderer
+│   │   ├── js
+│   │   │   ├── capture.js
+│   │   │   ├── color.js
+│   │   │   ├── dom.js
+│   │   │   ├── engines.js
+│   │   │   ├── fit.js
+│   │   │   ├── main.js
+│   │   │   └── tabs.js
+│   │   ├── styles
+│   │   │   ├── 00-vars.css
+│   │   │   ├── 10-header.css
+│   │   │   ├── 20-tabs.css
+│   │   │   ├── 30-window-controls.css
+│   │   │   ├── 40-content.css
+│   │   │   └── 99-scrollbar.css
+│   │   ├── global.d.ts
+│   │   └── index.html
+│   └── webview
+│       └── preload.capture.ts
+├── .env.example
+├── .eslintrc.json
+├── .gitignore
+├── arquitetura.txt
+├── New-DirTree.ps1
+├── package-lock.json
+├── package.json
+└── tsconfig.json

@@ -1,35 +1,58 @@
 /**
  * @file src/preload/preload.inspector.ts
- * @brief Bridge seguro para a janela do Inspetor.
- *        Exponho:
- *          - window.win: controles da janela do Inspetor
- *          - window.wirepeek: leitura de estado e stream de eventos cap-event
+ * @brief Bridge seguro (contextIsolation=true) para a janela do Inspector.
+ *
+ * O que este preload expõe no `window`:
+ *  - window.win:
+ *      * minimize() / toggleMaximize() / close()
+ *      * onMaximizedChange(cb)
+ *      * setBackground(hex) → sincroniza a cor nativa do Inspector
+ *  - window.wirepeek (API do Inspector):
+ *      * getState()              → busca estado de captura no main
+ *      * onState(cb)             → assina atualizações do estado (push)
+ *      * onCapEvent(cb)          → stream de eventos de captura normalizados
+ *
+ * Canais esperados no processo principal (compatível com ipc.window.ts):
+ *   "win:minimize"        (ipcMain.on)
+ *   "win:close"           (ipcMain.on)
+ *   "win:toggleMaximize"  (ipcMain.handle)
+ *   "ui:set-bg"           (ipcMain.on)
+ *   "win:maximized-change"(win.on("maximize"/"unmaximize") → webContents.send)
+ *
+ *   "wirepeek:getState"   (ipcMain.handle)
+ *   "cap:state"           (main → renderer)
+ *   "cap-event"           (main → renderer)
  */
 
 import { contextBridge, ipcRenderer } from "electron";
 import type { IpcRendererEvent } from "electron";
-import type { CaptureState, WirepeekAPI } from "./preload"; // reaproveita os tipos
+
+/* ───────────────────────── Tipos locais ───────────────────────── */
 
 type Unsubscribe = () => void;
 
-/* ============================================================================
- * Declaração global coerente com o outro preload (opcional)
- * ========================================================================== */
-declare global {
-  interface Window {
-    win?: {
-      minimize: () => Promise<unknown>;
-      toggleMaximize: () => Promise<{ maximized: boolean } | void>;
-      close: () => Promise<unknown>;
-      onMaximizedChange: (cb: (maximized: boolean) => void) => Unsubscribe;
-    };
-    wirepeek?: WirepeekAPI;
-  }
+/** Estado mínimo da captura utilizado pelo Inspector. */
+export type CaptureState = { capturing: boolean };
+
+/** API de janela (mesma forma usada no preload principal). */
+export interface WinAPI {
+  minimize: () => void;
+  toggleMaximize: () => Promise<{ maximized: boolean } | void>;
+  close: () => void;
+  onMaximizedChange: (cb: (maximized: boolean) => void) => Unsubscribe;
+  setBackground: (hex: string) => void;
 }
 
-/* ============================================================================
- * Util
- * ========================================================================== */
+/** API específica do Inspector. */
+export interface WirepeekInspectorAPI {
+  getState: () => Promise<CaptureState>;
+  onState: (cb: (s: CaptureState) => void) => Unsubscribe;
+  onCapEvent: (cb: (env: { channel: string; payload: unknown }) => void) => Unsubscribe;
+}
+
+/* ───────────────────────── Utilitários ───────────────────────── */
+
+/** Registra listener em um canal e retorna função de unsubscribe. */
 function on<T>(
   channel: string,
   handler: (_e: IpcRendererEvent, data: T) => void
@@ -39,31 +62,49 @@ function on<T>(
   return () => ipcRenderer.removeListener(channel, wrapped);
 }
 
-/* ============================================================================
- * APIs
- * ========================================================================== */
+/** Valida #rrggbb. */
+function isHex6(s: unknown): s is string {
+  return typeof s === "string" && /^#([0-9a-f]{6})$/i.test(s);
+}
 
-const winApi = {
-  minimize: () => ipcRenderer.invoke("win:minimize"),
+/* ───────────────────────── window.win (Inspector) ───────────────────────── */
+
+const winApi: WinAPI = {
+  // No main estes canais são .on() → aqui usamos send()
+  minimize: () => ipcRenderer.send("win:minimize"),
+  close: () => ipcRenderer.send("win:close"),
+
+  // No main este canal é .handle() → aqui usamos invoke()
   toggleMaximize: () => ipcRenderer.invoke("win:toggleMaximize"),
-  close: () => ipcRenderer.invoke("win:close"),
-  onMaximizedChange: (cb: (v: boolean) => void) =>
-    on<boolean>("win:maximized-change", (_e, v) => cb(v)),
+
+  // Reflete mudanças de maximização (útil para trocar ícone/UX no Inspector)
+  onMaximizedChange: (cb) =>
+    on<boolean>("win:maximized-change", (_e, maximized) => cb(!!maximized)),
+
+  // Sincroniza cor nativa da janela do Inspector
+  setBackground: (hex: string) => {
+    if (isHex6(hex)) ipcRenderer.send("ui:set-bg", hex);
+  },
 };
 
-const wirepeekInspectorApi = {
+/* ───────────────────────── window.wirepeek (Inspector) ───────────────────────── */
+
+const wirepeekInspectorApi: WirepeekInspectorAPI = {
+  /** Lê o estado de captura atual no processo principal. */
   getState: () => ipcRenderer.invoke("wirepeek:getState") as Promise<CaptureState>,
 
-  onState: (cb: (s: CaptureState) => void) =>
-    on<CaptureState>("cap:state", (_e, s) => cb(s)),
+  /** Assina atualizações de estado (push do main). */
+  onState: (cb) => on<CaptureState>("cap:state", (_e, s) => cb(s)),
 
-  onCapEvent: (
-    cb: (env: { channel: string; payload: unknown }) => void
-  ) => on<{ channel: string; payload: unknown }>("cap-event", (_e, env) => cb(env)),
+  /**
+   * Stream de eventos de captura normalizados pelo main.
+   * Estrutura: { channel: string, payload: unknown }
+   */
+  onCapEvent: (cb) =>
+    on<{ channel: string; payload: unknown }>("cap-event", (_e, env) => cb(env)),
 };
 
-/* ============================================================================
- * Exposição segura
- * ========================================================================== */
+/* ───────────────────────── Exposição segura ───────────────────────── */
+
 contextBridge.exposeInMainWorld("win", winApi);
 contextBridge.exposeInMainWorld("wirepeek", wirepeekInspectorApi);

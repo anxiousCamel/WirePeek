@@ -1,86 +1,89 @@
 ﻿/**
  * @file src/preload/preload.ts
- * @brief Bridge seguro (contextIsolation=true) para a UI principal.
- *        Exponho:
- *          - window.win: controles de janela
- *          - window.wirepeek: captura, navegação, eventos e config
+ * @brief Bridge seguro (contextIsolation=true) entre renderer e processo principal.
+ *
+ * Expõe em window:
+ *  - window.win:
+ *      * minimize(), toggleMaximize(), close()
+ *      * onMaximizedChange(cb)
+ *      * setBackground(hex)  → sincroniza cor nativa da BrowserWindow
+ *  - window.wirepeek:
+ *      * start()/stop()/getState()/getCachedState()
+ *      * navigate(url), openInspector()
+ *      * emitCapture(channel, payload)   → payload sanitizado p/ IPC
+ *      * onConfig(cb)                    → define __wvPreloadPath / __wvPartition
+ *      * onState(cb)                     → cache atualizado em push
+ *
+ * Canais esperados no main:
+ *   "win:minimize" (on), "win:close" (on), "win:toggleMaximize" (handle),
+ *   "ui:set-bg" (on),   "win:maximized-change" (send),
+ *   "wirepeek:start|stop|getState|navigate" (handle), "inspector:open" (handle),
+ *   "cap:from-webview" (on), "ui:config" (send), "cap:state" (send).
  */
 
 import { contextBridge, ipcRenderer } from "electron";
 import type { IpcRendererEvent } from "electron";
 
-/* ============================================================================
- * Tipos públicos expostos ao renderer
- * ========================================================================== */
+/* ───────────────────────── Tipos públicos ───────────────────────── */
+
 export type UiConfig = {
   targetUrl?: string;
   isDev?: boolean;
-  /** caminho file:// para o preload do <webview> */
+  /** caminho file:// do preload do <webview> */
   wvPreload?: string;
+  /** partition do <webview> (ex.: "persist:wirepeek") */
   wvPartition?: string;
 };
 
 export type CaptureState = { capturing: boolean };
+
+/** Função de desinscrição de listeners. */
 type Unsubscribe = () => void;
 
-/** Controles da janela focada. */
+/** Controles de janela focada. */
 export interface WinAPI {
   /** Minimiza a janela focada. */
-  minimize: () => Promise<unknown>;
+  minimize: () => void;
   /** Alterna maximizar/restaurar. Retorna estado atual. */
   toggleMaximize: () => Promise<{ maximized: boolean } | void>;
   /** Fecha a janela focada. */
-  close: () => Promise<unknown>;
+  close: () => void;
   /** Observa mudanças de maximização. */
   onMaximizedChange: (cb: (maximized: boolean) => void) => Unsubscribe;
+  /** Define a cor nativa do fundo da janela (#rrggbb). */
+  setBackground: (hex: string) => void;
 }
 
-/** API de captura e utilidades para a UI. */
+/** API geral da UI (captura, inspector, navegação). */
 export interface WirepeekAPI {
-  /** Inicia captura (abre Inspetor). */
+  /** Inicia a captura (tipicamente abre/mostra o Inspector). */
   start: () => Promise<CaptureState>;
-  /** Para captura. */
+  /** Para a captura. */
   stop: () => Promise<{ capturing: boolean; out?: unknown } | CaptureState>;
-  /** Estado atual via IPC. */
+  /** Busca estado atual via IPC. */
   getState: () => Promise<CaptureState>;
-  /** Estado em cache (sem IPC). */
+  /** Lê o estado em cache (sem IPC). */
   getCachedState: () => CaptureState;
 
-  /** Navega a janela principal. */
+  /** Navega a janela principal para uma URL. */
   navigate: (url: string) => Promise<{ ok: true } | { ok: false; error: string }>;
 
-  /** Abre a janela do Inspetor. */
+  /** Abre (ou foca) o Inspector. */
   openInspector: () => Promise<unknown>;
 
-  /** Encaminha envelopes de captura vindos do webview. */
+  /** Encaminha envelopes de captura vindos do <webview> (guest → main). */
   emitCapture: (channel: string, payload: unknown) => void;
 
-  /** Recebe config inicial (targetUrl, wvPreload). */
+  /** Recebe config inicial (targetUrl, wvPreload, wvPartition). */
   onConfig: (cb: (cfg: UiConfig) => void) => Unsubscribe;
 
-  /** Observa mudanças de estado da captura (cap:state). */
+  /** Observa mudanças de estado da captura. */
   onState: (cb: (s: CaptureState) => void) => Unsubscribe;
 }
 
-/* ============================================================================
- * Ambiente global do renderer (TS)
- *  - Use opcional (?) para evitar conflito entre múltiplos preloads
- *  - __wvPreloadPath aceita undefined por causa de exactOptionalPropertyTypes
- * ========================================================================== */
-declare global {
-  interface Window {
-    win?: WinAPI;
-    wirepeek?: WirepeekAPI;
-    __wvPreloadPath: string | undefined;
-    __wvPartition?: string | undefined;
-  }
-}
+/* ───────────────────────── Utilitários internos ───────────────────────── */
 
-/* ============================================================================
- * Utilidades internas
- * ========================================================================== */
-
-/** Registra listener e devolve unsubscribe. */
+/** Registra listener em canal e devolve unsubscribe. */
 function on<T>(
   channel: string,
   handler: (_e: IpcRendererEvent, data: T) => void
@@ -90,30 +93,56 @@ function on<T>(
   return () => ipcRenderer.removeListener(channel, wrapped);
 }
 
-/** Cache leve do estado da captura. */
+/** Valida #rrggbb. */
+function isHex6(s: unknown): s is string {
+  return typeof s === "string" && /^#([0-9a-f]{6})$/i.test(s);
+}
+
+/**
+ * Sanitiza um objeto para transporte por IPC (evita “An object could not be cloned”).
+ * Remove estruturas não-serializáveis e valores cíclicos.
+ */
+function safeIpcPayload<T>(x: T): T | { _unserializable: true } {
+  try {
+    return JSON.parse(JSON.stringify(x)) as T;
+  } catch {
+    return { _unserializable: true } as const;
+  }
+}
+
+/** Cache leve de estado de captura (evita round-trips em leituras frequentes). */
 const stateCache: CaptureState = { capturing: false };
 
-/* ============================================================================
- * Implementações
- * ========================================================================== */
+/* ───────────────────────── window.win ───────────────────────── */
 
-/** ---------------- window.win ---------------- */
 const winApi: WinAPI = {
-  minimize: () => ipcRenderer.invoke("win:minimize"),
+  // No main estes canais são .on() (fire-and-forget), então usamos send().
+  minimize: () => ipcRenderer.send("win:minimize"),
+  close: () => ipcRenderer.send("win:close"),
+
+  // No main este canal é .handle(), então usamos invoke() para ter retorno.
   toggleMaximize: () => ipcRenderer.invoke("win:toggleMaximize"),
-  close: () => ipcRenderer.invoke("win:close"),
-  onMaximizedChange: (cb) => on<boolean>("win:maximized-change", (_e, v) => cb(v)),
+
+  // Listener para refletir mudanças do estado de maximização no renderer.
+  onMaximizedChange: (cb) =>
+    on<boolean>("win:maximized-change", (_e, maximized) => cb(!!maximized)),
+
+  // Sincroniza a cor de fundo nativa (BrowserWindow#setBackgroundColor).
+  setBackground: (hex: string) => {
+    if (isHex6(hex)) ipcRenderer.send("ui:set-bg", hex);
+  },
 };
 
-/** ---------------- window.wirepeek ---------------- */
+/* ───────────────────────── window.wirepeek ───────────────────────── */
+
 const wirepeekApi: WirepeekAPI = {
-  start: async () => {
+  async start() {
     const s = (await ipcRenderer.invoke("wirepeek:start")) as CaptureState;
     stateCache.capturing = !!s?.capturing;
     return s;
   },
 
-  stop: async () => {
+  async stop() {
     const s = (await ipcRenderer.invoke("wirepeek:stop")) as {
       capturing: boolean;
       out?: unknown;
@@ -122,7 +151,7 @@ const wirepeekApi: WirepeekAPI = {
     return s;
   },
 
-  getState: async () => {
+  async getState() {
     const s = (await ipcRenderer.invoke("wirepeek:getState")) as CaptureState;
     stateCache.capturing = !!s?.capturing;
     return s;
@@ -134,14 +163,27 @@ const wirepeekApi: WirepeekAPI = {
 
   openInspector: () => ipcRenderer.invoke("inspector:open"),
 
-  emitCapture: (channel: string, payload: unknown) =>
-    ipcRenderer.send("cap:from-webview", { channel, payload }),
+  emitCapture: (channel: string, payload: unknown) => {
+    // payload sanitizado para garantir clonagem pelo IPC
+    ipcRenderer.send("cap:from-webview", { channel, payload: safeIpcPayload(payload) });
+  },
 
   onConfig: (cb) =>
     on<UiConfig>("ui:config", (_e, cfg) => {
-      // salva/limpa o caminho do preload do <webview> no escopo global da UI
-      window.__wvPreloadPath = typeof cfg?.wvPreload === "string" ? cfg.wvPreload : undefined;
-      window.__wvPartition = typeof cfg?.wvPartition === "string" ? cfg.wvPartition : undefined;
+      // __wvPreloadPath
+      if (typeof cfg?.wvPreload === "string") {
+        window.__wvPreloadPath = cfg.wvPreload;
+      } else {
+        delete window.__wvPreloadPath; // evita atribuir undefined com exactOptionalPropertyTypes
+      }
+
+      // __wvPartition
+      if (typeof cfg?.wvPartition === "string") {
+        window.__wvPartition = cfg.wvPartition;
+      } else {
+        delete window.__wvPartition;
+      }
+
       cb(cfg);
     }),
 
@@ -152,9 +194,7 @@ const wirepeekApi: WirepeekAPI = {
     }),
 };
 
-/* ============================================================================
- * Exposição segura
- * ========================================================================== */
+/* ───────────────────────── Exposição segura ───────────────────────── */
 
 contextBridge.exposeInMainWorld("win", winApi);
 contextBridge.exposeInMainWorld("wirepeek", wirepeekApi);
